@@ -9,3 +9,4 @@ openmeteo-requests>=1.0
 requests-cache>=1.0
 retry-requests>=2.0
 scipy>=1.10
+holidays>=0.50

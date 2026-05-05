@@ -2,15 +2,17 @@
 Stage 4 — Feature engineering.
 
 Operates on aligned base_dataset. All features are derived from the same column
-names across both zones — no zone-specific logic.
+names across both zones — no zone-specific logic in schema.
 
 Features added:
   Derived:
     residual_load          = load - (wind_generation + solar_generation)
     renewable_penetration  = (wind_generation + solar_generation) / load
 
-  Temporal:
-    hour, weekday, month
+  Temporal (raw + circular encoding):
+    hour, weekday, month, week_of_year
+    hour_sin/cos, weekday_sin/cos, month_sin/cos, week_sin/cos
+    is_holiday     per zone (DE for DE-LU, ES for ES)
 
   Price lags (strictly backward-looking, computed per zone independently):
     lag_1    = price shifted 1h
@@ -21,6 +23,13 @@ Features added:
     price_roll_24h   = 24h rolling mean of price
     price_roll_168h  = 168h rolling mean of price
 
+Feature selection rationale (Tschora 2024 Ch.3 + findings_entsoe.html):
+  - SHAP confirms lag_24h and lag_168h dominate; lag_1 secondary
+  - Renewable generation most important exogenous feature for DE market
+  - Gas price matters but can be misleading in high-volatility regimes
+  - Circular encoding of temporal features outperforms raw integers
+  - is_holiday flag captures extreme negative-price events (e.g. May 1 solar saturation)
+
 Output:
   data/processed/final_dataset.parquet
 """
@@ -30,10 +39,13 @@ from __future__ import annotations
 import logging
 import pandas as pd
 import numpy as np
+import holidays as hdays
 
 from config import DATA_ALIGNED, DATA_PROCESSED, ZONES
 
 log = logging.getLogger(__name__)
+
+_ZONE_COUNTRY = {"DE-LU": "DE", "ES": "ES"}
 
 
 def add_derived(df: pd.DataFrame) -> pd.DataFrame:
@@ -46,12 +58,48 @@ def add_derived(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_temporal(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # timestamp is the first level of the MultiIndex
     ts = df.index.get_level_values("timestamp")
-    df["hour"]    = ts.hour
-    df["weekday"] = ts.dayofweek   # 0 = Monday
-    df["month"]   = ts.month
+
+    # Raw integers
+    df["hour"]         = ts.hour
+    df["weekday"]      = ts.dayofweek   # 0 = Monday
+    df["month"]        = ts.month
+    df["week_of_year"] = ts.isocalendar().week.values.astype(int)
+
+    # Circular encoding — converts cyclic integers to (sin, cos) pairs so models
+    # see e.g. hour 23 and hour 0 as adjacent, not maximally separated
+    df["hour_sin"]    = np.sin(2 * np.pi * df["hour"] / 24)
+    df["hour_cos"]    = np.cos(2 * np.pi * df["hour"] / 24)
+    df["weekday_sin"] = np.sin(2 * np.pi * df["weekday"] / 7)
+    df["weekday_cos"] = np.cos(2 * np.pi * df["weekday"] / 7)
+    df["month_sin"]   = np.sin(2 * np.pi * (df["month"] - 1) / 12)
+    df["month_cos"]   = np.cos(2 * np.pi * (df["month"] - 1) / 12)
+    df["week_sin"]    = np.sin(2 * np.pi * (df["week_of_year"] - 1) / 52)
+    df["week_cos"]    = np.cos(2 * np.pi * (df["week_of_year"] - 1) / 52)
+
     return df
+
+
+def add_holidays(df: pd.DataFrame) -> pd.DataFrame:
+    """Add per-zone binary is_holiday flag.
+
+    Captures public holidays that suppress industrial demand and enable
+    solar-saturation negative-price events (e.g. May 1 Labor Day in DE/ES).
+    Zone → country mapping: DE-LU → DE, ES → ES.
+    """
+    frames = []
+    for zone in ZONES:
+        zone_df = df.xs(zone, level="zone").copy()
+        country = _ZONE_COUNTRY.get(zone, "DE")
+        cal = hdays.country_holidays(country)
+        dates = zone_df.index.date
+        zone_df["is_holiday"] = np.array([int(d in cal) for d in dates], dtype=np.int8)
+        zone_df["zone"] = zone
+        frames.append(zone_df)
+
+    combined = pd.concat(frames)
+    combined = combined.reset_index().set_index(["timestamp", "zone"]).sort_index()
+    return combined
 
 
 def add_lags(df: pd.DataFrame) -> pd.DataFrame:
@@ -87,9 +135,9 @@ def engineer_features(drop_lag_na: bool = True) -> pd.DataFrame:
     df = add_derived(df)
     df = add_temporal(df)
     df = add_lags(df)
+    df = add_holidays(df)
 
     if drop_lag_na:
-        # Drop rows where lag_168 is NaN (first 168h per zone)
         before = len(df)
         df = df.dropna(subset=["lag_168"])
         log.info("Dropped %d rows with NaN lag_168 (burn-in period)", before - len(df))
