@@ -1,0 +1,9 @@
+data/
+models/
+notebooks/.ipynb_checkpoints/
+__pycache__/
+*.pyc
+*.pkl
+*.parquet
+*.egg-info/
+.env
