@@ -81,19 +81,49 @@ def add_temporal(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_holidays(df: pd.DataFrame) -> pd.DataFrame:
-    """Add per-zone binary is_holiday flag.
+    """Add per-zone holiday features.
 
-    Captures public holidays that suppress industrial demand and enable
-    solar-saturation negative-price events (e.g. May 1 Labor Day in DE/ES).
-    Zone → country mapping: DE-LU → DE, ES → ES.
+    is_holiday          — binary flag for the current day
+    days_to_holiday     — days until next public holiday (capped at 7)
+    days_from_holiday   — days since last public holiday (capped at 7)
+
+    The distance features give the model continuous temporal context around
+    holidays. A binary flag causes abrupt jumps on bridge days (e.g. the
+    Friday between a Thursday holiday and a weekend). Continuous distance
+    lets it learn that demand starts suppressing a day or two in advance and
+    recovers gradually after.
     """
     frames = []
     for zone in ZONES:
         zone_df = df.xs(zone, level="zone").copy()
         country = _ZONE_COUNTRY.get(zone, "DE")
-        cal = hdays.country_holidays(country)
+
+        years   = range(zone_df.index.year.min(), zone_df.index.year.max() + 2)
+        cal     = hdays.country_holidays(country, years=years)
+        cal_set = set(cal.keys())
+
         dates = zone_df.index.date
-        zone_df["is_holiday"] = np.array([int(d in cal) for d in dates], dtype=np.int8)
+        zone_df["is_holiday"] = np.array([int(d in cal_set) for d in dates], dtype=np.int8)
+
+        # Vectorised holiday-distance using ordinals + searchsorted
+        hol_ord  = np.array(sorted(d.toordinal() for d in cal_set))
+        date_ord = np.array([d.toordinal() for d in dates])
+
+        # days_to_holiday: distance to next holiday (search right, then subtract)
+        idx_next    = np.searchsorted(hol_ord, date_ord, side="right")
+        idx_next    = np.clip(idx_next, 0, len(hol_ord) - 1)
+        days_to_raw = hol_ord[idx_next] - date_ord
+        days_to     = np.where(days_to_raw > 0, days_to_raw, 7)  # 0 = today is holiday → use 7
+
+        # days_from_holiday: distance since last holiday (search left, then subtract)
+        idx_prev      = np.searchsorted(hol_ord, date_ord, side="left") - 1
+        idx_prev      = np.clip(idx_prev, 0, len(hol_ord) - 1)
+        days_from_raw = date_ord - hol_ord[idx_prev]
+        days_from     = np.where(days_from_raw > 0, days_from_raw, 7)
+
+        zone_df["days_to_holiday"]   = np.clip(days_to,   0, 7).astype(np.int8)
+        zone_df["days_from_holiday"] = np.clip(days_from, 0, 7).astype(np.int8)
+
         zone_df["zone"] = zone
         frames.append(zone_df)
 
@@ -103,7 +133,7 @@ def add_holidays(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_lags(df: pd.DataFrame) -> pd.DataFrame:
-    """Add price lags per zone. Groups by zone to avoid cross-zone leakage."""
+    """Add price lags + ramp features per zone. Groups by zone to avoid cross-zone leakage."""
     df = df.copy()
     lag_defs = {"lag_1": 1, "lag_24": 24, "lag_168": 168}
 
@@ -117,6 +147,10 @@ def add_lags(df: pd.DataFrame) -> pd.DataFrame:
 
         zone_df["price_roll_24h"]  = zone_df["price"].rolling(24,  min_periods=12).mean()
         zone_df["price_roll_168h"] = zone_df["price"].rolling(168, min_periods=84).mean()
+
+        # Hour-over-hour change in residual load — proxy for how fast the grid
+        # needs to ramp expensive gas turbines. Large positive ramp → spike risk.
+        zone_df["residual_load_ramp"] = zone_df["residual_load"].diff(1)
 
         zone_df["zone"] = zone
         frames.append(zone_df)

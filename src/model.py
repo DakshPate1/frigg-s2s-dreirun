@@ -53,12 +53,18 @@ FEATURES = [
     "residual_load", "renewable_penetration",
     # Cross-border flows (net imports MW; ENTSOE source)
     "net_imports",
+    # Grid stress signal — hour-over-hour ramp in residual load
+    # Large positive ramp → gas peakers must spin up fast → price spike risk
+    "residual_load_ramp",
     # Calendar — circular encoding
     "hour_sin", "hour_cos",
     "weekday_sin", "weekday_cos",
     "month_sin", "month_cos",
     "week_sin", "week_cos",
     "is_holiday",
+    # Holiday proximity — continuous distance avoids binary bridge-day edge cases
+    "days_to_holiday",
+    "days_from_holiday",
     # Price history
     "lag_1", "lag_24", "lag_168",
     "price_roll_24h", "price_roll_168h",
@@ -239,29 +245,60 @@ def build_longterm_model(zdf: pd.DataFrame, zone: str) -> dict:
     """
     Seasonal profile + annual trend for horizons beyond SHORTTERM_DAYS.
 
-    Profile: mean price per (month, dayofweek, hour) from all historical data
-             through CAL_END — 12×7×24 = 2016 cells.
-    Trend:   linear regression of year → annual mean price, extrapolated forward.
-    Uncertainty: std of (actual − profile_pred), scaled by sqrt(horizon_months)
-                 to reflect growing uncertainty at longer horizons.
+    PROFILE — recency-weighted median per (month, dayofweek, hour):
+      Years are resampled proportionally to their recency weight before the
+      grouped median is taken. This down-weights the anomalous 2022 energy
+      crisis (TTF gas at 10× normal) and amplifies the post-crisis 2023-2025
+      regime which better reflects near-future structural conditions.
 
-    p50 uses 45th-percentile residual to stay consistent with the scoring metric.
+    TREND — post-crisis linear anchor (2023+):
+      We fit the trend on 2023-onward annual means only, where the market has
+      normalised after the Russia/Ukraine supply shock. Using the full 2021-2025
+      window would import the crisis spike and its subsequent crash into the
+      slope, overstating reversion or understating the underlying drift.
+      If fewer than 2 post-crisis years exist, we fall back to all years.
+
+    STRUCTURAL NOTE (documented, not modelled):
+      - DE-LU nuclear phase-out completed Apr 2023 → slightly higher residual
+        load prices in low-wind periods; partially offset by continued onshore
+        wind build-out (~5 GW/yr).
+      - ES solar capacity growing ~8 GW/yr → deeper midday troughs going
+        forward; our seasonal profile captures the 2024 shape but will
+        under-estimate the dip by 2027-2028.
+      These effects widen the honest uncertainty band but are not explicitly
+      modelled — interval scaling with sqrt(horizon_months) provides a
+      conservative hedge.
+
+    UNCERTAINTY:
+      std of (actual − profile_pred) × 1.96 × sqrt-scaled horizon factor.
+      p50 bias uses 45th-percentile residual to match the scoring metric.
     """
     hist = zdf[zdf.index < CAL_END].dropna(subset=["price"])
 
-    # ── Seasonal profile ──────────────────────────────────────────────────────
+    # ── Recency-weighted seasonal profile (median, not mean) ──────────────────
+    # Weight: 2021→1, 2022→1, 2023→2, 2024→3, 2025→4  (exponential-ish recency)
+    first_year = int(hist.index.year.min())
+    year_weights = {y: max(1, y - first_year) for y in hist.index.year.unique()}
+    weighted_parts = [
+        pd.concat([hist[hist.index.year == y]] * w)
+        for y, w in year_weights.items()
+    ]
+    w_hist = pd.concat(weighted_parts).sort_index()
+
     profile = (
-        hist.groupby([hist.index.month, hist.index.dayofweek, hist.index.hour])["price"]
-        .mean()
+        w_hist.groupby([w_hist.index.month, w_hist.index.dayofweek, w_hist.index.hour])["price"]
+        .median()
     )
     profile.index.names = ["month", "weekday", "hour"]
-    global_mean = float(hist["price"].mean())
+    global_mean = float(hist["price"].median())
 
-    # ── Annual trend ──────────────────────────────────────────────────────────
-    annual = hist.groupby(hist.index.year)["price"].mean()
-    if len(annual) >= 2:
-        years  = annual.index.values.astype(float)
-        slope, intercept = np.polyfit(years, annual.values, 1)
+    # ── Post-crisis trend (2023+) ─────────────────────────────────────────────
+    annual      = hist.groupby(hist.index.year)["price"].mean()
+    post_crisis = annual[annual.index >= 2023]
+    trend_src   = post_crisis if len(post_crisis) >= 2 else annual
+    if len(trend_src) >= 2:
+        years  = trend_src.index.values.astype(float)
+        slope, intercept = np.polyfit(years, trend_src.values, 1)
     else:
         slope, intercept = 0.0, float(annual.mean())
     anchor_year = int(annual.index[-1])
@@ -276,11 +313,10 @@ def build_longterm_model(zdf: pd.DataFrame, zone: str) -> dict:
     profile_preds = pd.Series([_profile_pred(ts) for ts in hist.index], index=hist.index)
     resid         = hist["price"] - profile_preds
     resid_std     = float(resid.std())
-    # 45th-percentile residual: p50 should be the 45th pctile, not median, per scoring
     resid_q45     = float(np.quantile(resid.dropna().values, 0.45))
 
-    log.info("  %s LT: slope=%.2f EUR/yr  resid_std=%.2f  q45_bias=%.2f  anchor=%d",
-             zone, slope, resid_std, resid_q45, anchor_year)
+    log.info("  %s LT: slope=%.2f EUR/yr (src=%d-%d)  resid_std=%.2f  q45_bias=%.2f",
+             zone, slope, int(trend_src.index[0]), anchor_year, resid_std, resid_q45)
 
     return {
         "profile":     profile,
@@ -424,11 +460,14 @@ def build_eval_row(
     # ── Generation / proxy features ───────────────────────────────────────────
     same_hw = ref[(ref.index.hour == ts.hour) & (ref.index.dayofweek == ts.dayofweek)]
     proxy_cols = ["load", "wind_generation", "solar_generation", "hydro_generation",
-                  "residual_load", "renewable_penetration"]
+                  "residual_load", "renewable_penetration", "residual_load_ramp"]
     if "net_imports" in ref.columns:
         proxy_cols.append("net_imports")
     for col in proxy_cols:
-        row[col] = float(same_hw[col].mean()) if len(same_hw) > 0 else float(ref[col].mean())
+        if col in ref.columns:
+            row[col] = float(same_hw[col].mean()) if len(same_hw) > 0 else float(ref[col].mean())
+        else:
+            row[col] = 0.0
 
     # ── Weather: forecast if available, else same-weekday-hour proxy ──────────
     weather_cols = ["temperature", "wind_speed", "solar_radiation"]
@@ -438,6 +477,25 @@ def build_eval_row(
     else:
         for col in weather_cols:
             row[col] = float(same_hw[col].mean()) if len(same_hw) > 0 else float(ref[col].mean())
+
+    # ── Holiday proximity ─────────────────────────────────────────────────────
+    ts_date = ts.date()
+    hol_ord  = np.array(sorted(d.toordinal() for d in cal.keys()
+                               if abs(d.year - ts_date.year) <= 2))
+    if len(hol_ord):
+        d_ord = ts_date.toordinal()
+        idx_next    = np.searchsorted(hol_ord, d_ord, side="right")
+        idx_next    = min(idx_next, len(hol_ord) - 1)
+        days_to_raw = hol_ord[idx_next] - d_ord
+        row["days_to_holiday"] = int(np.clip(days_to_raw if days_to_raw > 0 else 7, 0, 7))
+
+        idx_prev      = np.searchsorted(hol_ord, d_ord, side="left") - 1
+        idx_prev      = max(idx_prev, 0)
+        days_from_raw = d_ord - hol_ord[idx_prev]
+        row["days_from_holiday"] = int(np.clip(days_from_raw if days_from_raw > 0 else 7, 0, 7))
+    else:
+        row["days_to_holiday"]   = 7
+        row["days_from_holiday"] = 7
 
     # ── Fuel: carry forward last known ────────────────────────────────────────
     row["gas_price"]    = float(ref["gas_price"].iloc[-1])

@@ -119,14 +119,27 @@ When `--predict` runs it automatically:
 
 | Horizon | Model | Features | Uncertainty |
 |---|---|---|---|
-| ≤ 7 days | Quantile LightGBM | All 26 features + recursive lags | CQR-calibrated ±interval |
-| > 7 days | Seasonal profile + trend | month × weekday × hour mean + annual trend | resid_std × 1.96 × sqrt-scale |
+| ≤ 7 days | Quantile LightGBM | All 29 features + recursive lags | CQR-calibrated ±interval |
+| > 7 days | Seasonal profile + trend | month × weekday × hour median + post-crisis annual trend | resid_std × 1.96 × sqrt-scale |
 
 **Long-term model (`build_longterm_model`):**
-- Profile: mean price per `(month, dayofweek, hour)` from all historical data through `CAL_END` — 2016 cells
-- Trend: linear regression of year → annual mean price, extrapolated forward
+- Profile: **recency-weighted median** per `(month, dayofweek, hour)` — years resampled proportional to recency (2021×1 → 2025×4) so energy-crisis 2022 outliers are down-weighted
+- Trend: **post-crisis anchor** — linear fit on 2023+ annual means only (falls back to all years if < 2 post-crisis years). Avoids importing the 2022 crisis spike/reversion into the slope.
 - p50 bias: 45th-percentile residual (matches scoring metric)
-- Interval: `resid_std × 1.96 × (1 + sqrt(excess_days/30) × 0.25)` — grows slowly with sqrt(months)
+- Interval: `resid_std × 1.96 × (1 + sqrt(excess_days/30) × 0.25)` — grows with sqrt(months)
+- Structural factors documented in docstring: DE-LU nuclear phase-out (Apr 2023), ES solar growth (~8 GW/yr), DE-LU wind build-out (~5 GW/yr)
+
+## Features (29 total)
+
+Three features added beyond the original 26:
+
+| Feature | Where added | Rationale |
+|---|---|---|
+| `residual_load_ramp` | `features.py add_lags()` | Hour-over-hour diff of residual_load per zone. Fast positive ramp = gas peakers spinning up = spike risk. |
+| `days_to_holiday` | `features.py add_holidays()` | Days until next public holiday, capped at 7. Continuous — avoids binary bridge-day edge cases. |
+| `days_from_holiday` | `features.py add_holidays()` | Days since last public holiday, capped at 7. Model learns gradual demand recovery pattern. |
+
+`residual_load_ramp` is per-zone (computed inside the zone loop in `add_lags` to avoid cross-zone leakage). Holiday distance uses vectorised numpy `searchsorted` on sorted holiday ordinals — fast even for 5-year datasets.
 
 ## Key constraints
 

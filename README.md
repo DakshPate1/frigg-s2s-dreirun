@@ -21,7 +21,8 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 - 26 features: generation + weather + fuel/carbon + circular calendar + is_holiday + price lags + net_imports.
 - Recursive lag fill for evaluation window: lag_1 / lag_24 populated slot-by-slot from model's own calibrated p50 predictions.
 - **CQR calibration applied** (Jan–May 2026 calibration set, n≈2992/zone): inflates p025/p975 symmetrically to hit 95% coverage; shifts p50 to correct systematic zone bias.
-- **Dual-regime forecasting**: ≤7 days from training tail → LightGBM + CQR; beyond → seasonal long-term model (month × weekday × hour profile + annual trend + sqrt-scaled uncertainty). Handles any horizon including 2-year forecasts required by notebook.
+- **Dual-regime forecasting**: ≤7 days → LightGBM + CQR; >7 days → long-term seasonal model (recency-weighted median profile + post-crisis 2023+ trend + sqrt-scaled uncertainty). Handles any horizon including 2-year notebook forecast.
+- **3 new features** (29 total): `residual_load_ramp` (gas ramp-rate spike trigger), `days_to_holiday` + `days_from_holiday` (continuous bridge-day context replacing binary flag).
 
 **Validation results (2025 holdout, pre-CQR):**
 
@@ -63,6 +64,11 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 - [x] ~~Conformalized Quantile Regression (CQR)~~ — **done**. Coverage corrected to 95% on both zones. Calibration set Jan–May 2026 (n≈2992/zone). See `calibrate_zone()` in `src/model.py`.
 - [x] ~~Open-Meteo weather forecast for eval window~~ — **done**. `fetch_weather_forecast()` called automatically by `model.py --predict`; replaces seasonal proxy for temperature/wind/solar_radiation on all eval slots.
 - [x] ~~ENTSOE actual cross-border flows for gap period~~ — **done**. `fetch_gap_actuals()` in `model.py` fetches prices + net_imports for the gap between training tail and eval start; lag_24 lookups use real values.
+
+**Recent feature improvements:**
+- [x] `residual_load_ramp` — hour-over-hour grid ramp rate; triggers gas-peaker spike predictions
+- [x] `days_to_holiday` / `days_from_holiday` — continuous holiday proximity; fixes bridge-day misses
+- [x] Long-term model: recency-weighted median profile + post-crisis (2023+) trend anchor
 
 **Worth exploring if time allows:**
 - [ ] Mondrian conformal bands — holiday-aware calibration to tighten intervals on normal hours without widening tail-event hours. Closes the remaining coverage gap from seasonal distribution shift.
