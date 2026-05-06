@@ -16,22 +16,34 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 - Full hourly dataset 2021–present for both zones: ~93k rows × 31 columns.
 - Cross-border net import/export flows added as a new feature (`net_imports`, MW): 8 neighbors for DE-LU, FR + PT for ES. This captures interconnection pressure that energy-charts couldn't provide.
 
-**Model (src/model.py) — trained, predictions generated**
+**Model (src/model.py) — trained, CQR-calibrated, predictions generated**
 - Quantile LightGBM at q = 0.025 / 0.45 / 0.975 per zone. p50 trained at q=0.45 to match scoring function (underforecast bias by design).
 - 26 features: generation + weather + fuel/carbon + circular calendar + is_holiday + price lags + net_imports.
-- Recursive lag fill for evaluation window: lag_1 / lag_24 populated slot-by-slot from model's own p50 predictions.
+- Recursive lag fill for evaluation window: lag_1 / lag_24 populated slot-by-slot from model's own calibrated p50 predictions.
+- **CQR calibration applied** (Jan–May 2026 calibration set, n≈2992/zone): inflates p025/p975 symmetrically to hit 95% coverage; shifts p50 to correct systematic zone bias.
 
-**Validation results (2025 holdout):**
+**Validation results (2025 holdout, pre-CQR):**
 
 | Zone | MAE p50 | Pinball 0.45 | Coverage p025–p975 | Band width | Naive MAE |
 |------|--------:|-------------:|-------------------:|-----------:|----------:|
 | DE-LU | 8.53 EUR/MWh | 4.12 | 88.0% | 44.97 EUR/MWh | 33.10 |
 | ES | 6.95 EUR/MWh | 3.50 | 82.3% | 29.33 EUR/MWh | 28.97 |
 
-**Eval window predictions (predictions.csv) — submitted candidate**
+**CQR calibration results (Jan–May 2026 calibration set):**
+
+| Zone | Coverage (raw → CQR) | Pinball 0.45 (raw → CQR) | Band width | CQR interval shift | p50 shift |
+|------|---------------------:|-------------------------:|-----------:|-------------------:|----------:|
+| DE-LU | 88% → 95% | 4.12 → ~4.1 | ~59 EUR/MWh | ±8.11 EUR/MWh | +0.72 |
+| ES | 74.8% → 95% | 3.64 → 3.43 | ~40 EUR/MWh | ±5.21 EUR/MWh | −2.08 |
+
+**Eval window predictions (predictions.csv) — CQR-calibrated candidate**
 - 30 slots, May 8–9 2026 in CEST.
-- DE-LU: mean p50 ~€80, strong solar dip midday (p50 → −€8), evening recovery to €101.
-- ES: mean p50 ~€68, midday near zero, evening €100.
+- DE-LU: mean p50 ~€81, strong solar dip midday (p50 → −€8), evening recovery to €101.
+- ES: mean p50 ~€63, midday near zero, evening €100.
+
+**Playground notebook (`notebooks/playground.ipynb`) — ready**
+- 36-cell notebook covering every pipeline layer: data health → EDA → features → training → validation metrics (with explanations) → CQR before/after → feature importance → error analysis → eval window preview.
+- All sections independently runnable. Run `python notebooks/gen_playground.py` to regenerate.
 
 **Feature selection rationale (from Tschora 2024 + ENTSOE analysis)**
 - Documented in Key findings section below.
@@ -47,7 +59,7 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 - [ ] Package `data.zip` with all data files used + README.txt describing each file
 
 **High-value improvements:**
-- [ ] Conformalized Quantile Regression (CQR) — current coverage 82–88%, target 95%. Hold out last 3 months of 2024 as calibration set, apply CQR correction to p025/p975. Should be ~30 lines on top of current model.
+- [x] ~~Conformalized Quantile Regression (CQR)~~ — **done**. Coverage corrected to 95% on both zones. Calibration set Jan–May 2026 (n≈2992/zone). See `calibrate_zone()` in `src/model.py`.
 - [ ] Open-Meteo weather forecast for eval window — currently using seasonal same-weekday-hour proxy; actual 10-day forecast available free. Replace proxy in `build_eval_row` for better eval-window accuracy.
 - [ ] Eval window: fetch ENTSOE actual cross-border flows for May 1–7 (they exist now) so `net_imports` lags are real values not proxies.
 
