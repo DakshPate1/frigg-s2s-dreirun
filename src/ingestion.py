@@ -93,7 +93,9 @@ def fetch_entsoe_prices(zone: str, start: str = TRAIN_START, end: str = TRAIN_EN
     for s, e in _chunk_dates(start, end, 180):
         log.info("ENTSOE prices %s  %s → %s", zone, s, e)
         try:
-            series = client.query_day_ahead_prices(eic, start=_ts(s), end=_ts(e))
+            # +1 day: ENTSOE end is exclusive at midnight Brussels; without this the
+            # last day of each 180-day chunk is missing its hours 01:00–21:00 UTC.
+            series = client.query_day_ahead_prices(eic, start=_ts(s), end=_ts(e) + pd.Timedelta(days=1))
             series = _resample_hourly(series)
             series = series.tz_convert("UTC")
             df = series.reset_index()
@@ -155,8 +157,9 @@ def fetch_entsoe_generation(zone: str, start: str = TRAIN_START, end: str = TRAI
     for s, e in _chunk_dates(start, end, 180):
         log.info("ENTSOE generation %s  %s → %s", zone, s, e)
         try:
-            gen_raw  = client.query_generation(eic, start=_ts(s), end=_ts(e))
-            load_raw = client.query_load(eic, start=_ts(s), end=_ts(e))
+            ts_end   = _ts(e) + pd.Timedelta(days=1)  # +1 day: ENTSOE end is exclusive at midnight
+            gen_raw  = client.query_generation(eic, start=_ts(s), end=ts_end)
+            load_raw = client.query_load(eic, start=_ts(s), end=ts_end)
 
             gen_raw  = _resample_hourly(gen_raw)
             load_raw = _resample_hourly(_parse_entsoe_load(load_raw))
@@ -199,7 +202,8 @@ def fetch_entsoe_crossborder(zone: str, start: str = TRAIN_START, end: str = TRA
     chunk_nets: list[pd.Series] = []
 
     for s, e in _chunk_dates(start, end, 180):
-        ts_s, ts_e = _ts(s), _ts(e)
+        ts_s = _ts(s)
+        ts_e = _ts(e) + pd.Timedelta(days=1)  # +1 day: ENTSOE end is exclusive at midnight
         net_chunk: pd.Series | None = None
 
         for nbr_eic in neighbors:

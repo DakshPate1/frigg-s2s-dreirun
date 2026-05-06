@@ -35,8 +35,8 @@ from config import (
 
 log = logging.getLogger(__name__)
 
-MAX_INTERP_GAP = 3   # hours: interpolate gaps up to this size
-MAX_LARGE_GAP  = 24  # hours: gaps larger than this will be logged as warnings
+MAX_INTERP_GAP = 24  # hours: interpolate gaps up to this size (covers 21h chunk-boundary gaps)
+MAX_LARGE_GAP  = 48  # hours: gaps larger than this will be logged as warnings
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────

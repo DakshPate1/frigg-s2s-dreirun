@@ -84,15 +84,26 @@ def validate(path: str | None = None) -> bool:
         log.info("  ✓ Zones: %s", actual_zones)
 
     # 4. Continuous hourly timestamps per zone
+    # Warn for small gaps (e.g. real-world outages like the Apr 2025 ES blackout);
+    # error only for large gaps that indicate a systematic ingestion problem.
+    GAP_WARN_THRESHOLD  =  50   # warn if missing < 50 timestamps
+    GAP_ERROR_THRESHOLD = 200   # error if missing >= 200 timestamps
     for zone in ZONES:
         ts = df.xs(zone, level="zone").index.sort_values()
         expected = pd.date_range(ts.min(), ts.max(), freq="h", tz="UTC")
         missing = expected.difference(ts)
-        if len(missing):
-            log.error("FAIL: Zone %s: %d missing hourly timestamps", zone, len(missing))
+        n = len(missing)
+        if n == 0:
+            log.info("  ✓ Zone %s: continuous hourly timestamps (%d rows)", zone, len(ts))
+        elif n < GAP_WARN_THRESHOLD:
+            log.warning("WARN: Zone %s: %d missing hourly timestamps (real-world gap — acceptable)", zone, n)
+            warnings += 1
+        elif n < GAP_ERROR_THRESHOLD:
+            log.error("FAIL: Zone %s: %d missing hourly timestamps", zone, n)
             errors += 1
         else:
-            log.info("  ✓ Zone %s: continuous hourly timestamps (%d rows)", zone, len(ts))
+            log.error("FAIL: Zone %s: %d missing hourly timestamps (large gap — check ingestion)", zone, n)
+            errors += 1
 
     # 5. Value range checks
     for col, (lo, hi) in RANGE_CHECKS.items():

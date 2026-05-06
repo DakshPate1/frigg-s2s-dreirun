@@ -312,6 +312,7 @@ def build_eval_row(
     ts: pd.Timestamp,
     predicted_p50: dict,
     cal,
+    weather_fcst: pd.DataFrame | None = None,
 ) -> dict:
     """
     Build one feature row for a single eval-window timestamp.
@@ -320,20 +321,28 @@ def build_eval_row(
     before this row is built — enabling honest recursive lag_1 / lag_24 fill.
 
     Generation/load (future unknown): same-weekday-hour mean from last 4 weeks.
+    Weather: Open-Meteo 10-day forecast if provided, else same-weekday-hour proxy.
     Lags: actual prices where available; predicted p50 where recursive.
     """
     row: dict = {}
 
-    # ── Generation / weather proxies ──────────────────────────────────────────
+    # ── Generation / proxy features ───────────────────────────────────────────
     same_hw = ref[(ref.index.hour == ts.hour) & (ref.index.dayofweek == ts.dayofweek)]
     proxy_cols = ["load", "wind_generation", "solar_generation", "hydro_generation",
-                  "temperature", "wind_speed", "solar_radiation",
                   "residual_load", "renewable_penetration"]
-    # net_imports: same weekday-hour proxy (cross-border flows follow weekly patterns)
     if "net_imports" in ref.columns:
         proxy_cols.append("net_imports")
     for col in proxy_cols:
         row[col] = float(same_hw[col].mean()) if len(same_hw) > 0 else float(ref[col].mean())
+
+    # ── Weather: forecast if available, else same-weekday-hour proxy ──────────
+    weather_cols = ["temperature", "wind_speed", "solar_radiation"]
+    if weather_fcst is not None and ts in weather_fcst.index:
+        for col in weather_cols:
+            row[col] = float(weather_fcst.loc[ts, col])
+    else:
+        for col in weather_cols:
+            row[col] = float(same_hw[col].mean()) if len(same_hw) > 0 else float(ref[col].mean())
 
     # ── Fuel: carry forward last known ────────────────────────────────────────
     row["gas_price"]    = float(ref["gas_price"].iloc[-1])
@@ -420,6 +429,23 @@ def main(predict: bool = False) -> None:
     eval_end   = pd.Timestamp("2026-05-09 22:00", tz="UTC")
     eval_idx   = pd.date_range(eval_start, eval_end, freq="h")
 
+    # Fetch Open-Meteo 10-day weather forecast for the eval window (once, outside zone loop)
+    from ingestion import fetch_weather_forecast as _fetch_wx_fcst
+    fcst_date_start = eval_start.strftime("%Y-%m-%d")
+    fcst_date_end   = eval_end.strftime("%Y-%m-%d")
+    zone_weather_fcst: dict[str, pd.DataFrame | None] = {}
+    for zone in ZONES:
+        try:
+            raw = _fetch_wx_fcst(zone, fcst_date_start, fcst_date_end)
+            raw["time"] = pd.to_datetime(raw["time"], utc=True)
+            raw = raw.set_index("time")
+            zone_weather_fcst[zone] = raw
+            log.info("  Weather forecast %s: %d rows (May %s–%s)",
+                     zone, len(raw), fcst_date_start, fcst_date_end)
+        except Exception as exc:
+            log.warning("  Weather forecast fetch failed for %s: %s — using proxy", zone, exc)
+            zone_weather_fcst[zone] = None
+
     zone_preds = {}
     for zone in ZONES:
         zdf = df.xs(zone, level="zone").sort_index()
@@ -438,6 +464,7 @@ def main(predict: bool = False) -> None:
 
         ref = zdf[eval_start - pd.Timedelta(weeks=4) : eval_start - pd.Timedelta(hours=1)]
         cal = hdays.country_holidays(_ZONE_COUNTRY[zone])
+        weather_fcst = zone_weather_fcst[zone]
 
         predicted_p50 = {}  # populated slot-by-slot for recursive lags
         p025_list, p50_list, p975_list = [], [], []
@@ -446,7 +473,7 @@ def main(predict: bool = False) -> None:
         q_50 = cqr[zone]["p50"]
 
         for ts in eval_idx:
-            row = build_eval_row(zdf, ref, zone, ts, predicted_p50, cal)
+            row = build_eval_row(zdf, ref, zone, ts, predicted_p50, cal, weather_fcst)
             x   = pd.DataFrame([row])[FEATURES]
 
             p025 = float(all_models[zone][0.025].predict(x)[0])
