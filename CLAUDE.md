@@ -99,17 +99,34 @@ python model.py
 # Predict the hackathon eval window (default: 2026-05-08 17:00 → 2026-05-09 22:00 UTC)
 python model.py --predict
 
-# Predict any arbitrary window (day-ahead or multi-day)
+# Predict any arbitrary window — short-term, long-term, or mixed
 python model.py --predict --start "2026-05-10 17:00" --end "2026-05-11 22:00"
+python model.py --predict --start "2026-05-10 00:00" --end "2028-05-10 00:00"  # 2-year
 
 # Backtest: if --start/--end overlap actuals in the dataset, accuracy is reported automatically
 python model.py --predict --start "2025-06-01 00:00" --end "2025-06-02 23:00"
 ```
 
 When `--predict` runs it automatically:
-1. Fetches ENTSOE prices + cross-border flows for any gap between training tail and eval start (`fetch_gap_actuals`) — gives lag_24 real values instead of averages
-2. Fetches Open-Meteo 10-day forecast for the prediction window — replaces seasonal same-weekday-hour proxy for temperature/wind/solar_radiation
-3. Applies CQR calibration to all output quantiles
+1. Fetches ENTSOE prices + cross-border flows for gap between training tail and eval start (`fetch_gap_actuals`) — gives lag_24 real values instead of averages
+2. Fetches Open-Meteo forecast (capped at 14 days) — replaces seasonal proxy for temperature/wind/solar_radiation on near-term slots
+3. Routes each slot by horizon:
+   - **≤ `SHORTTERM_DAYS` (7d)** from training tail → LightGBM + CQR
+   - **> 7d** → long-term seasonal model (no CQR; own uncertainty)
+4. Outputs `alpine-arbitrage_predictions.csv`
+
+## Forecasting regimes
+
+| Horizon | Model | Features | Uncertainty |
+|---|---|---|---|
+| ≤ 7 days | Quantile LightGBM | All 26 features + recursive lags | CQR-calibrated ±interval |
+| > 7 days | Seasonal profile + trend | month × weekday × hour mean + annual trend | resid_std × 1.96 × sqrt-scale |
+
+**Long-term model (`build_longterm_model`):**
+- Profile: mean price per `(month, dayofweek, hour)` from all historical data through `CAL_END` — 2016 cells
+- Trend: linear regression of year → annual mean price, extrapolated forward
+- p50 bias: 45th-percentile residual (matches scoring metric)
+- Interval: `resid_std × 1.96 × (1 + sqrt(excess_days/30) × 0.25)` — grows slowly with sqrt(months)
 
 ## Key constraints
 

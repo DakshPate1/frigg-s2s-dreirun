@@ -16,11 +16,12 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 - Full hourly dataset 2021–present for both zones: ~93k rows × 31 columns.
 - Cross-border net import/export flows added as a new feature (`net_imports`, MW): 8 neighbors for DE-LU, FR + PT for ES. This captures interconnection pressure that energy-charts couldn't provide.
 
-**Model (src/model.py) — trained, CQR-calibrated, predictions generated**
+**Model (src/model.py) — trained, CQR-calibrated, dual-regime predictions**
 - Quantile LightGBM at q = 0.025 / 0.45 / 0.975 per zone. p50 trained at q=0.45 to match scoring function (underforecast bias by design).
 - 26 features: generation + weather + fuel/carbon + circular calendar + is_holiday + price lags + net_imports.
 - Recursive lag fill for evaluation window: lag_1 / lag_24 populated slot-by-slot from model's own calibrated p50 predictions.
 - **CQR calibration applied** (Jan–May 2026 calibration set, n≈2992/zone): inflates p025/p975 symmetrically to hit 95% coverage; shifts p50 to correct systematic zone bias.
+- **Dual-regime forecasting**: ≤7 days from training tail → LightGBM + CQR; beyond → seasonal long-term model (month × weekday × hour profile + annual trend + sqrt-scaled uncertainty). Handles any horizon including 2-year forecasts required by notebook.
 
 **Validation results (2025 holdout, pre-CQR):**
 
@@ -90,8 +91,9 @@ python pipeline.py --validate-only
 # Train model and generate predictions (hackathon eval window):
 python model.py --predict
 
-# Predict any arbitrary window (e.g. run on May 10 to get May 11-12):
-python model.py --predict --start "2026-05-10 17:00" --end "2026-05-12 22:00"
+# Predict any window — model auto-selects regime per slot:
+python model.py --predict --start "2026-05-10 17:00" --end "2026-05-12 22:00"  # short-term
+python model.py --predict --start "2026-05-10 00:00" --end "2028-05-10 00:00"  # 2-year LT
 
 # Backtest against known prices (actuals auto-reported if window overlaps dataset):
 python model.py --predict --start "2025-06-01 00:00" --end "2025-06-02 23:00"
@@ -178,14 +180,14 @@ src/
   features.py     derived features, circular encoding, lags, holiday flag
   validation.py   hard assertions on final dataset quality
   pipeline.py     orchestrator with --from-* resume flags; auto-loads .env
-  model.py        quantile LightGBM training, CQR calibration, flexible prediction
-                  (--start/--end for any window; backtest if actuals exist; gap fetch + weather forecast automatic)
+  model.py        quantile LightGBM (short-term) + seasonal profile (long-term), CQR calibration
+                  (--start/--end for any window; auto regime split at 7d; backtest if actuals exist)
 
 notebooks/
   gen_notebook.py  run this to generate model.ipynb (submission notebook)
   gen_playground.py run this to regenerate playground.ipynb
   playground.ipynb  36-cell exploration notebook covering every pipeline layer
 
-predictions.csv   current best submission (30 rows, eval window, CQR-calibrated)
+alpine-arbitrage_predictions.csv   current best submission (30 rows, eval window, CQR-calibrated)
 .env.example      copy to .env and set ENTSOE_TOKEN
 ```
