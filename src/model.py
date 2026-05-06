@@ -381,7 +381,7 @@ def build_eval_row(
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(predict: bool = False) -> None:
+def main(predict: bool = False, pred_start: str | None = None, pred_end: str | None = None) -> None:
     log.info("Loading dataset from %s", DATA_PATH)
     df = pd.read_parquet(DATA_PATH)
 
@@ -420,14 +420,18 @@ def main(predict: bool = False) -> None:
         return
 
     log.info("━" * 56)
-    log.info("Generating eval-window predictions (CQR-adjusted)")
+    log.info("Generating predictions (CQR-adjusted)")
 
     import holidays as hdays
     _ZONE_COUNTRY = {"DE-LU": "DE", "ES": "ES"}
 
-    eval_start = pd.Timestamp("2026-05-08 17:00", tz="UTC")
-    eval_end   = pd.Timestamp("2026-05-09 22:00", tz="UTC")
+    # Hackathon eval window defaults; override via --start / --end
+    _DEFAULT_START = "2026-05-08 17:00"
+    _DEFAULT_END   = "2026-05-09 22:00"
+    eval_start = pd.Timestamp(pred_start or _DEFAULT_START, tz="UTC")
+    eval_end   = pd.Timestamp(pred_end   or _DEFAULT_END,   tz="UTC")
     eval_idx   = pd.date_range(eval_start, eval_end, freq="h")
+    log.info("  Window: %s → %s  (%d slots)", eval_start, eval_end, len(eval_idx))
 
     # Fetch Open-Meteo 10-day weather forecast for the eval window (once, outside zone loop)
     from ingestion import fetch_weather_forecast as _fetch_wx_fcst
@@ -525,10 +529,38 @@ def main(predict: bool = False) -> None:
     log.info("Saved %s  (%d rows)", OUT_PATH, len(out))
     log.info("Preview:\n%s", out.to_string())
 
+    # ── Backtest: if the window overlaps known actuals, report accuracy ────────
+    log.info("━" * 56)
+    any_backtest = False
+    for zone in ZONES:
+        zdf = df.xs(zone, level="zone").sort_index()
+        known = zdf[(zdf.index >= eval_start) & (zdf.index <= eval_end)]["price"].dropna()
+        if len(known) == 0:
+            continue
+        any_backtest = True
+        p50_arr  = np.array(zone_preds[zone]["p50"])
+        p025_arr = np.array(zone_preds[zone]["p025"])
+        p975_arr = np.array(zone_preds[zone]["p975"])
+        # Align: only slots where actuals exist
+        mask     = np.array([ts in known.index for ts in eval_idx])
+        y_known  = known.reindex(eval_idx[mask]).values
+        log.info("  BACKTEST %s (%d slots with actuals):", zone, mask.sum())
+        log.info("    MAE p50      : %.2f EUR/MWh", np.abs(y_known - p50_arr[mask]).mean())
+        log.info("    Pinball 0.45 : %.4f", pinball(y_known, p50_arr[mask], 0.45))
+        log.info("    Coverage     : %.1f%%", coverage(y_known, p025_arr[mask], p975_arr[mask]) * 100)
+    if not any_backtest:
+        log.info("  No actuals in dataset for this window — forward prediction only.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--predict", action="store_true",
-                        help="Also generate predictions.csv for eval window")
+                        help="Generate predictions.csv for the specified window")
+    parser.add_argument("--start", default=None,
+                        help="Prediction window start, UTC (e.g. '2026-05-10 17:00'). "
+                             "Defaults to hackathon eval window 2026-05-08 17:00.")
+    parser.add_argument("--end", default=None,
+                        help="Prediction window end, UTC (e.g. '2026-05-11 22:00'). "
+                             "Defaults to hackathon eval window 2026-05-09 22:00.")
     args = parser.parse_args()
-    main(predict=args.predict)
+    main(predict=args.predict, pred_start=args.start, pred_end=args.end)
