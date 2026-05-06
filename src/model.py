@@ -59,9 +59,10 @@ TARGET    = "price"
 ZONES     = ["DE-LU", "ES"]
 QUANTILES = [0.025, 0.45, 0.975]
 
-# Train on 2021–2024; validate on 2025; eval window is May 2026
+# Train on 2021–2024; validate on 2025; calibrate on Jan–May 2026; eval window is May 2026
 TRAIN_END = "2025-01-01"
 VAL_END   = "2026-01-01"
+CAL_END   = "2026-05-08"   # stop before eval window
 
 # ── LightGBM base params ──────────────────────────────────────────────────────
 LGB_BASE = dict(
@@ -157,6 +158,67 @@ def feature_importance(qmodels: dict, zone: str) -> None:
     log.info("  %s — top-10 feature importance (p50 model):", zone)
     for feat, score in imp.head(10).items():
         log.info("    %-30s %d", feat, score)
+
+
+# ── CQR calibration ───────────────────────────────────────────────────────────
+
+def calibrate_zone(zdf: pd.DataFrame, qmodels: dict, zone: str) -> dict:
+    """
+    Conformalized Quantile Regression (CQR) calibration.
+
+    Calibration window: VAL_END → CAL_END (Jan–May 2026).
+    Held out from both training (ends 2025-01-01) and reported validation (2025).
+
+    Two corrections:
+      q_hat_interval — symmetric EUR/MWh inflation applied to both sides of
+                       [p025, p975] to achieve empirical 95% coverage.
+      q_hat_50       — additive shift to p50 to achieve 45th-percentile
+                       calibration (directly targets the scoring metric).
+
+    CQR guarantee: on exchangeable calibration+test data, coverage ≥ 1−α.
+    """
+    cal = zdf[(zdf.index >= VAL_END) & (zdf.index < CAL_END)]
+    cal = cal.dropna(subset=FEATURES + [TARGET])
+
+    if len(cal) < 100:
+        log.warning("  %s: calibration set too small (%d rows) — CQR skipped", zone, len(cal))
+        return {"interval": 0.0, "p50": 0.0, "n": 0}
+
+    X_cal = cal[FEATURES]
+    y_cal = cal[TARGET].values
+    n     = len(y_cal)
+
+    p025 = qmodels[0.025].predict(X_cal)
+    p50  = qmodels[0.45].predict(X_cal)
+    p975 = qmodels[0.975].predict(X_cal)
+    p025 = np.minimum(p025, p50)
+    p975 = np.maximum(p975, p50)
+
+    # ── Interval: inflate [p025, p975] to 95% coverage ────────────────────────
+    # Score = how far y lies outside the current interval (negative = already inside)
+    scores   = np.maximum(p025 - y_cal, y_cal - p975)
+    q_level  = min(0.95 * (1 + 1 / n), 1.0)
+    q_hat_iv = float(np.quantile(scores, q_level))
+
+    # ── p50: shift to 45th-percentile calibration ─────────────────────────────
+    # Residuals > 0 mean y > p50 (model is under-forecasting)
+    resid_50  = y_cal - p50
+    q_level50 = min(0.45 * (1 + 1 / n), 1.0)
+    q_hat_50  = float(np.quantile(resid_50, q_level50))
+
+    # ── Diagnostics ───────────────────────────────────────────────────────────
+    cov_raw = float(((y_cal >= p025)              & (y_cal <= p975)).mean())              * 100
+    cov_cal = float(((y_cal >= p025 - q_hat_iv)   & (y_cal <= p975 + q_hat_iv)).mean())   * 100
+    pb_raw  = pinball(y_cal, p50, 0.45)
+    pb_cal  = pinball(y_cal, p50 + q_hat_50, 0.45)
+
+    log.info("  %s  CQR (n=%d  window=%s→%s)", zone, n, VAL_END[:7], CAL_END[:7])
+    log.info("    interval  Q_hat=%.2f EUR/MWh  coverage raw=%.1f%% → cal=%.1f%% (target 95%%)",
+             q_hat_iv, cov_raw, cov_cal)
+    log.info("    p50 shift Q_hat=%.2f EUR/MWh  pinball  raw=%.4f → cal=%.4f",
+             q_hat_50, pb_raw, pb_cal)
+
+    return {"interval": q_hat_iv, "p50": q_hat_50, "n": n}
 
 
 # ── Eval-window feature construction ─────────────────────────────────────────
@@ -256,11 +318,18 @@ def main(predict: bool = False) -> None:
         report_zone(zone, all_val[zone])
         feature_importance(all_models[zone], zone)
 
+    log.info("━" * 56)
+    log.info("CQR CALIBRATION  (window: %s → %s)", VAL_END, CAL_END)
+    cqr = {}
+    for zone in ZONES:
+        zdf = df.xs(zone, level="zone").sort_index()
+        cqr[zone] = calibrate_zone(zdf, all_models[zone], zone)
+
     if not predict:
         return
 
     log.info("━" * 56)
-    log.info("Generating eval-window predictions")
+    log.info("Generating eval-window predictions (CQR-adjusted)")
 
     import holidays as hdays
     _ZONE_COUNTRY = {"DE-LU": "DE", "ES": "ES"}
@@ -278,6 +347,9 @@ def main(predict: bool = False) -> None:
         predicted_p50 = {}  # populated slot-by-slot for recursive lags
         p025_list, p50_list, p975_list = [], [], []
 
+        q_iv = cqr[zone]["interval"]
+        q_50 = cqr[zone]["p50"]
+
         for ts in eval_idx:
             row = build_eval_row(zdf, ref, zone, ts, predicted_p50, cal)
             x   = pd.DataFrame([row])[FEATURES]
@@ -286,20 +358,30 @@ def main(predict: bool = False) -> None:
             p50  = float(all_models[zone][0.45].predict(x)[0])
             p975 = float(all_models[zone][0.975].predict(x)[0])
 
-            # Guarantee quantile ordering
+            # Enforce quantile ordering before CQR
             p025 = min(p025, p50)
             p975 = max(p975, p50)
 
-            predicted_p50[ts] = p50   # available for subsequent slots' lags
+            # Apply CQR corrections
+            p50  = p50  + q_50           # shift p50 toward true 45th percentile
+            p025 = p025 - q_iv           # inflate lower bound
+            p975 = p975 + q_iv           # inflate upper bound
+
+            # Re-enforce ordering after calibration
+            p025 = min(p025, p50)
+            p975 = max(p975, p50)
+
+            predicted_p50[ts] = p50      # calibrated p50 for subsequent lag lookups
             p025_list.append(p025)
             p50_list.append(p50)
             p975_list.append(p975)
 
         zone_preds[zone] = {"p025": p025_list, "p50": p50_list, "p975": p975_list}
-        log.info("  %s: mean p50=%.2f  band=%.2f",
+        log.info("  %s: mean p50=%.2f  band=%.2f  (CQR: iv±%.2f  p50+%.2f)",
                  zone,
                  np.mean(p50_list),
-                 np.mean(np.array(p975_list) - np.array(p025_list)))
+                 np.mean(np.array(p975_list) - np.array(p025_list)),
+                 q_iv, q_50)
 
     # Build submission CSV
     # Timestamps: ISO 8601 with CEST offset (+02:00, Europe is on summer time in May)
