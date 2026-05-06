@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT       = Path(__file__).parent.parent
 DATA_PATH  = ROOT / "data" / "processed" / "final_dataset.parquet"
-OUT_PATH   = ROOT / "predictions.csv"
+OUT_PATH   = ROOT / "alpine-arbitrage_predictions.csv"
 
 # ── Features ──────────────────────────────────────────────────────────────────
 # Ordered by expected importance (findings_entsoe + Tschora SHAP):
@@ -72,6 +72,9 @@ QUANTILES = [0.025, 0.45, 0.975]
 TRAIN_END = "2025-01-01"
 VAL_END   = "2026-01-01"
 CAL_END   = "2026-05-08"   # stop before eval window
+
+# Horizon regime split: ≤ this many days → LightGBM; beyond → seasonal long-term model
+SHORTTERM_DAYS = 7
 
 # ── LightGBM base params ──────────────────────────────────────────────────────
 LGB_BASE = dict(
@@ -228,6 +231,98 @@ def calibrate_zone(zdf: pd.DataFrame, qmodels: dict, zone: str) -> dict:
              q_hat_50, pb_raw, pb_cal)
 
     return {"interval": q_hat_iv, "p50": q_hat_50, "n": n}
+
+
+# ── Long-term seasonal model ──────────────────────────────────────────────────
+
+def build_longterm_model(zdf: pd.DataFrame, zone: str) -> dict:
+    """
+    Seasonal profile + annual trend for horizons beyond SHORTTERM_DAYS.
+
+    Profile: mean price per (month, dayofweek, hour) from all historical data
+             through CAL_END — 12×7×24 = 2016 cells.
+    Trend:   linear regression of year → annual mean price, extrapolated forward.
+    Uncertainty: std of (actual − profile_pred), scaled by sqrt(horizon_months)
+                 to reflect growing uncertainty at longer horizons.
+
+    p50 uses 45th-percentile residual to stay consistent with the scoring metric.
+    """
+    hist = zdf[zdf.index < CAL_END].dropna(subset=["price"])
+
+    # ── Seasonal profile ──────────────────────────────────────────────────────
+    profile = (
+        hist.groupby([hist.index.month, hist.index.dayofweek, hist.index.hour])["price"]
+        .mean()
+    )
+    profile.index.names = ["month", "weekday", "hour"]
+    global_mean = float(hist["price"].mean())
+
+    # ── Annual trend ──────────────────────────────────────────────────────────
+    annual = hist.groupby(hist.index.year)["price"].mean()
+    if len(annual) >= 2:
+        years  = annual.index.values.astype(float)
+        slope, intercept = np.polyfit(years, annual.values, 1)
+    else:
+        slope, intercept = 0.0, float(annual.mean())
+    anchor_year = int(annual.index[-1])
+
+    # ── Residual uncertainty ──────────────────────────────────────────────────
+    def _profile_pred(ts: pd.Timestamp) -> float:
+        try:
+            return float(profile.loc[(ts.month, ts.dayofweek, ts.hour)])
+        except KeyError:
+            return global_mean
+
+    profile_preds = pd.Series([_profile_pred(ts) for ts in hist.index], index=hist.index)
+    resid         = hist["price"] - profile_preds
+    resid_std     = float(resid.std())
+    # 45th-percentile residual: p50 should be the 45th pctile, not median, per scoring
+    resid_q45     = float(np.quantile(resid.dropna().values, 0.45))
+
+    log.info("  %s LT: slope=%.2f EUR/yr  resid_std=%.2f  q45_bias=%.2f  anchor=%d",
+             zone, slope, resid_std, resid_q45, anchor_year)
+
+    return {
+        "profile":     profile,
+        "global_mean": global_mean,
+        "slope":       slope,
+        "intercept":   intercept,
+        "anchor_year": anchor_year,
+        "resid_std":   resid_std,
+        "resid_q45":   resid_q45,
+    }
+
+
+def predict_longterm_slot(
+    ts: pd.Timestamp,
+    lt: dict,
+    horizon_days: float,
+) -> tuple[float, float, float]:
+    """
+    Predict (p025, p50, p975) for one slot at a long horizon.
+
+    Interval = 1.96 × resid_std × horizon_scale, where:
+      horizon_scale = 1 + sqrt(max(horizon_days − SHORTTERM_DAYS, 0) / 30) × 0.25
+    This gives ~base width at 7 days, growing slowly as sqrt(months) beyond.
+    """
+    # Seasonal component
+    try:
+        seasonal = float(lt["profile"].loc[(ts.month, ts.dayofweek, ts.hour)])
+    except KeyError:
+        seasonal = lt["global_mean"]
+
+    # Trend: delta from anchor year
+    years_out = (ts.year - lt["anchor_year"]) + (ts.month - 1) / 12.0
+    trend_adj = lt["slope"] * years_out
+
+    p50 = seasonal + trend_adj + lt["resid_q45"]
+
+    # Widening interval
+    excess_days   = max(horizon_days - SHORTTERM_DAYS, 0.0)
+    horizon_scale = 1.0 + (excess_days / 30.0) ** 0.5 * 0.25
+    half_interval = lt["resid_std"] * 1.96 * horizon_scale
+
+    return p50 - half_interval, p50, p50 + half_interval
 
 
 # ── Gap actuals fetch ─────────────────────────────────────────────────────────
@@ -416,6 +511,13 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
         zdf = df.xs(zone, level="zone").sort_index()
         cqr[zone] = calibrate_zone(zdf, all_models[zone], zone)
 
+    log.info("━" * 56)
+    log.info("LONG-TERM MODEL  (seasonal profile + annual trend)")
+    lt_models = {}
+    for zone in ZONES:
+        zdf = df.xs(zone, level="zone").sort_index()
+        lt_models[zone] = build_longterm_model(zdf, zone)
+
     if not predict:
         return
 
@@ -433,21 +535,30 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
     eval_idx   = pd.date_range(eval_start, eval_end, freq="h")
     log.info("  Window: %s → %s  (%d slots)", eval_start, eval_end, len(eval_idx))
 
-    # Fetch Open-Meteo 10-day weather forecast for the eval window (once, outside zone loop)
+    # Fetch Open-Meteo forecast — only for the short-term portion (≤16 days)
+    # Long-term slots use the seasonal profile; no point fetching a 2-year forecast.
     from ingestion import fetch_weather_forecast as _fetch_wx_fcst
-    fcst_date_start = eval_start.strftime("%Y-%m-%d")
-    fcst_date_end   = eval_end.strftime("%Y-%m-%d")
+    _WX_FCST_LIMIT_DAYS = 14
+    _today = pd.Timestamp.utcnow().normalize()
+    fcst_end_capped = min(eval_end, _today + pd.Timedelta(days=_WX_FCST_LIMIT_DAYS))
     zone_weather_fcst: dict[str, pd.DataFrame | None] = {}
-    for zone in ZONES:
-        try:
-            raw = _fetch_wx_fcst(zone, fcst_date_start, fcst_date_end)
-            raw["time"] = pd.to_datetime(raw["time"], utc=True)
-            raw = raw.set_index("time")
-            zone_weather_fcst[zone] = raw
-            log.info("  Weather forecast %s: %d rows (May %s–%s)",
-                     zone, len(raw), fcst_date_start, fcst_date_end)
-        except Exception as exc:
-            log.warning("  Weather forecast fetch failed for %s: %s — using proxy", zone, exc)
+    if fcst_end_capped > eval_start:
+        fcst_date_start = eval_start.strftime("%Y-%m-%d")
+        fcst_date_end   = fcst_end_capped.strftime("%Y-%m-%d")
+        for zone in ZONES:
+            try:
+                raw = _fetch_wx_fcst(zone, fcst_date_start, fcst_date_end)
+                raw["time"] = pd.to_datetime(raw["time"], utc=True)
+                raw = raw.set_index("time")
+                zone_weather_fcst[zone] = raw
+                log.info("  Weather forecast %s: %d rows (%s → %s)",
+                         zone, len(raw), fcst_date_start, fcst_date_end)
+            except Exception as exc:
+                log.warning("  Weather forecast fetch failed for %s: %s — proxy", zone, exc)
+                zone_weather_fcst[zone] = None
+    else:
+        log.info("  Window beyond 14-day forecast horizon — using seasonal proxy for all slots")
+        for zone in ZONES:
             zone_weather_fcst[zone] = None
 
     zone_preds = {}
@@ -472,42 +583,52 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
 
         predicted_p50 = {}  # populated slot-by-slot for recursive lags
         p025_list, p50_list, p975_list = [], [], []
+        regime_log = {"shortterm": 0, "longterm": 0}
 
-        q_iv = cqr[zone]["interval"]
-        q_50 = cqr[zone]["p50"]
+        q_iv    = cqr[zone]["interval"]
+        q_50    = cqr[zone]["p50"]
+        lt      = lt_models[zone]
+        zdf_tail = zdf.index[-1]   # reference point for horizon calculation
 
         for ts in eval_idx:
-            row = build_eval_row(zdf, ref, zone, ts, predicted_p50, cal, weather_fcst)
-            x   = pd.DataFrame([row])[FEATURES]
+            horizon_days = (ts - zdf_tail).total_seconds() / 86400.0
 
-            p025 = float(all_models[zone][0.025].predict(x)[0])
-            p50  = float(all_models[zone][0.45].predict(x)[0])
-            p975 = float(all_models[zone][0.975].predict(x)[0])
+            if horizon_days <= SHORTTERM_DAYS:
+                # ── Short-term: LightGBM + CQR ────────────────────────────────
+                row  = build_eval_row(zdf, ref, zone, ts, predicted_p50, cal, weather_fcst)
+                x    = pd.DataFrame([row])[FEATURES]
 
-            # Enforce quantile ordering before CQR
-            p025 = min(p025, p50)
-            p975 = max(p975, p50)
+                p025 = float(all_models[zone][0.025].predict(x)[0])
+                p50  = float(all_models[zone][0.45].predict(x)[0])
+                p975 = float(all_models[zone][0.975].predict(x)[0])
 
-            # Apply CQR corrections
-            p50  = p50  + q_50           # shift p50 toward true 45th percentile
-            p025 = p025 - q_iv           # inflate lower bound
-            p975 = p975 + q_iv           # inflate upper bound
+                p025 = min(p025, p50)
+                p975 = max(p975, p50)
 
-            # Re-enforce ordering after calibration
-            p025 = min(p025, p50)
-            p975 = max(p975, p50)
+                p50  = p50  + q_50
+                p025 = p025 - q_iv
+                p975 = p975 + q_iv
 
-            predicted_p50[ts] = p50      # calibrated p50 for subsequent lag lookups
+                p025 = min(p025, p50)
+                p975 = max(p975, p50)
+                regime_log["shortterm"] += 1
+
+            else:
+                # ── Long-term: seasonal profile + annual trend ─────────────────
+                p025, p50, p975 = predict_longterm_slot(ts, lt, horizon_days)
+                regime_log["longterm"] += 1
+
+            predicted_p50[ts] = p50
             p025_list.append(p025)
             p50_list.append(p50)
             p975_list.append(p975)
 
         zone_preds[zone] = {"p025": p025_list, "p50": p50_list, "p975": p975_list}
-        log.info("  %s: mean p50=%.2f  band=%.2f  (CQR: iv±%.2f  p50+%.2f)",
+        log.info("  %s: mean p50=%.2f  band=%.2f  [ST=%d LT=%d slots]",
                  zone,
                  np.mean(p50_list),
                  np.mean(np.array(p975_list) - np.array(p025_list)),
-                 q_iv, q_50)
+                 regime_log["shortterm"], regime_log["longterm"])
 
     # Build submission CSV
     # Timestamps: ISO 8601 with CEST offset (+02:00, Europe is on summer time in May)
