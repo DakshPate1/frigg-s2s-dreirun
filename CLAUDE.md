@@ -15,7 +15,7 @@ All scripts are in `src/` and must be run from within `src/` (imports are relati
 ```bash
 cd src
 
-# Full pipeline (ingestion takes ~20 min due to API rate limits)
+# Full pipeline — ENTSOE primary source, much faster than energy-charts
 python pipeline.py
 
 # Skip ingestion if raw CSVs already exist in data/raw/
@@ -52,13 +52,14 @@ data/processed/final_dataset.parquet           ← Stage 4: features.py   20 col
 **`config.py`** — single source of truth for all constants: zone names, API parameters, file paths (`ROOT`, `DATA_RAW`, `DATA_CLEAN`, `DATA_ALIGNED`, `DATA_PROCESSED`), weather station coordinates, date ranges (`TRAIN_START`, `TRAIN_END`), and evaluation window (`EVAL_START`, `EVAL_END`). Import from here rather than hardcoding.
 
 **`ingestion.py`** — fetches raw data from three APIs, writes unmodified CSVs:
-- `energy-charts.info` API: prices (`/price?bzn=`) and generation+load (`/public_power?country=`) in 180-day chunks due to API limits
+- **ENTSOE Transparency Platform** (primary): prices, load, generation per type, cross-border physical flows. API key in `config.ENTSOE_TOKEN`. Returns 15-min data → resampled to hourly. Raw CSVs in `data/raw/entsoe/`.
+- **energy-charts.info** (fallback, rate-limited): functions retained in `ingestion.py` as `fetch_prices_ec()` / `fetch_generation_ec()` — not called by default pipeline.
 - Open-Meteo archive API: weather (no API key) in 365-day chunks; also has `fetch_weather_forecast()` for the forward-looking period
 - yfinance: TTF gas futures (`TTF=F`) and KRBN carbon ETF as EUA proxy (daily, forward-filled to hourly)
 
-**`cleaning.py`** — per-dataset cleaning: UTC timestamp parsing (unix seconds or ISO strings), hourly reindex, linear interpolation for gaps ≤ 3h, clamp negatives. Generation columns are collapsed: wind = offshore + onshore (summed, clamped ≥ 0), hydro = run-of-river + reservoir + pumped storage.
+**`cleaning.py`** — per-dataset cleaning: UTC timestamp parsing, hourly reindex, linear interpolation for gaps ≤ 3h. ENTSOE generation columns arrive pre-aggregated from ingestion (wind/solar/hydro already collapsed). Cross-border parquet is optional — alignment skips it gracefully if absent.
 
-**`alignment.py`** — joins the four cleaned sources on a common UTC hourly index per zone, intersecting on the narrowest shared window. Drops rows missing any critical column (`price`, `load`, `wind_generation`, `solar_generation`, `temperature`). Produces a `(timestamp, zone)` MultiIndex DataFrame.
+**`alignment.py`** — joins cleaned sources on a common UTC hourly index per zone. Cross-border parquet (`crossborder_{zone}.parquet`) is joined with `left` if it exists. Drops rows missing any critical column (`price`, `load`, `wind_generation`, `solar_generation`, `temperature`). Produces a `(timestamp, zone)` MultiIndex DataFrame.
 
 **`features.py`** — adds derived features to the aligned dataset. **Lags are computed per zone independently** (call `df.xs(zone, level="zone")` before shifting) to prevent cross-zone data leakage. First 168 rows per zone are dropped after lag_168 is added (burn-in).
 
@@ -70,11 +71,12 @@ Index: `(timestamp [UTC hourly], zone ["DE-LU" | "ES"])`
 
 | Column | Source | Notes |
 |---|---|---|
-| `price` | energy-charts | Target variable, EUR/MWh |
-| `load` | energy-charts | MW |
-| `wind_generation` | energy-charts | MW, offshore+onshore summed |
-| `solar_generation` | energy-charts | MW |
-| `hydro_generation` | energy-charts | MW, three types summed |
+| `price` | ENTSOE | Target variable, EUR/MWh |
+| `load` | ENTSOE | MW |
+| `wind_generation` | ENTSOE | MW, offshore+onshore summed |
+| `solar_generation` | ENTSOE | MW |
+| `hydro_generation` | ENTSOE | MW, three types summed |
+| `net_imports` | ENTSOE | MW, net cross-border imports (positive = importing); 8 neighbors for DE-LU, 2 for ES |
 | `temperature` | Open-Meteo | °C at Frankfurt / Madrid |
 | `wind_speed` | Open-Meteo | m/s |
 | `solar_radiation` | Open-Meteo | W/m² |

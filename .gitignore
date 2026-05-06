@@ -7,3 +7,4 @@ __pycache__/
 *.parquet
 *.egg-info/
 .env
+these.pdf

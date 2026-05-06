@@ -18,8 +18,18 @@ Usage:
 from __future__ import annotations
 
 import sys
+import os
 import logging
 import argparse
+from pathlib import Path
+
+# Load .env from repo root if present (so teammates don't need to export manually)
+_env_file = Path(__file__).parent.parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        if _line.strip() and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 logging.basicConfig(
     level=logging.INFO,

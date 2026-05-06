@@ -2,10 +2,82 @@
 
 End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices for two European bidding zones: **DE-LU** (Germany-Luxembourg) and **ES** (Spain).
 
-Covers data ingestion through feature engineering, with modelling and probabilistic forecasting to follow.
-
 **Evaluation target:** 2026-05-08 18:00 CEST → 2026-05-09 23:00 CEST (30 hourly slots), quantiles p025 / p50 / p975.
 **Scoring:** asymmetric pinball loss at q=0.45 — overestimation penalised ~1.22× more than underestimation.
+
+---
+
+## Project status
+
+### Done
+
+**Data pipeline (Stages 1–5) — complete and validated**
+- ENTSOE Transparency Platform switched in as primary source (prices, load, generation, cross-border flows). energy-charts retained as fallback for rate-limit situations.
+- Full hourly dataset 2021–present for both zones: ~93k rows × 31 columns.
+- Cross-border net import/export flows added as a new feature (`net_imports`, MW): 8 neighbors for DE-LU, FR + PT for ES. This captures interconnection pressure that energy-charts couldn't provide.
+
+**Model (src/model.py) — trained, predictions generated**
+- Quantile LightGBM at q = 0.025 / 0.45 / 0.975 per zone. p50 trained at q=0.45 to match scoring function (underforecast bias by design).
+- 26 features: generation + weather + fuel/carbon + circular calendar + is_holiday + price lags + net_imports.
+- Recursive lag fill for evaluation window: lag_1 / lag_24 populated slot-by-slot from model's own p50 predictions.
+
+**Validation results (2025 holdout):**
+
+| Zone | MAE p50 | Pinball 0.45 | Coverage p025–p975 | Band width | Naive MAE |
+|------|--------:|-------------:|-------------------:|-----------:|----------:|
+| DE-LU | 8.53 EUR/MWh | 4.12 | 88.0% | 44.97 EUR/MWh | 33.10 |
+| ES | 6.95 EUR/MWh | 3.50 | 82.3% | 29.33 EUR/MWh | 28.97 |
+
+**Eval window predictions (predictions.csv) — submitted candidate**
+- 30 slots, May 8–9 2026 in CEST.
+- DE-LU: mean p50 ~€80, strong solar dip midday (p50 → −€8), evening recovery to €101.
+- ES: mean p50 ~€68, midday near zero, evening €100.
+
+**Feature selection rationale (from Tschora 2024 + ENTSOE analysis)**
+- Documented in Key findings section below.
+- Cross-zone features deliberately excluded: ES is isolated (Pyrenees bottleneck ~2.8 GW to FR), and the feature-vocabulary symmetry constraint would add noise not signal.
+
+---
+
+### What needs to happen next
+
+**Must-do before submission:**
+- [ ] Re-run full pipeline with ENTSOE as source to pull in `net_imports` for all training years, then retrain model — current predictions.csv was generated without this feature
+- [ ] Build `model.ipynb` submission notebook — `notebooks/gen_notebook.py` is ready, run it to generate the notebook skeleton, then fill in output cells
+- [ ] Package `data.zip` with all data files used + README.txt describing each file
+
+**High-value improvements:**
+- [ ] Conformalized Quantile Regression (CQR) — current coverage 82–88%, target 95%. Hold out last 3 months of 2024 as calibration set, apply CQR correction to p025/p975. Should be ~30 lines on top of current model.
+- [ ] Open-Meteo weather forecast for eval window — currently using seasonal same-weekday-hour proxy; actual 10-day forecast available free. Replace proxy in `build_eval_row` for better eval-window accuracy.
+- [ ] Eval window: fetch ENTSOE actual cross-border flows for May 1–7 (they exist now) so `net_imports` lags are real values not proxies.
+
+**Worth exploring if time allows:**
+- [ ] Mondrian conformal bands — holiday-aware calibration to tighten intervals on normal hours without widening tail-event hours. Closes the remaining coverage gap from seasonal distribution shift.
+- [ ] Day-ahead load + wind/solar forecasts from ENTSOE as features (ENTSOE provides these; thesis recommends using forecasts not actuals to avoid minor leakage). Available via `client.query_load_forecast()` and `client.query_wind_and_solar_forecast()`.
+- [ ] Longer training tail: ENTSOE data goes back to 2015; adding 2015–2020 may improve rare-event coverage (energy crisis periods, COVID demand collapse).
+- [ ] Gas price: TTF front-month futures (TTF=F) can be a lagged signal. Consider switching to day-ahead TTF spot if a reliable free source exists.
+
+---
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+
+# Add your ENTSOE token to .env (copy from .env.example):
+cp .env.example .env
+# edit .env and set ENTSOE_TOKEN=<your-token>
+# Free registration: https://transparency.entsoe.eu/usrm/user/createPublicUser
+
+cd src
+python pipeline.py              # full pipeline
+python pipeline.py --from-clean # skip ingestion (raw CSVs already exist)
+python pipeline.py --from-align # skip ingestion + cleaning
+python pipeline.py --validate-only
+
+# Train model and generate predictions:
+python model.py --predict
+```
 
 ---
 
@@ -13,75 +85,39 @@ Covers data ingestion through feature engineering, with modelling and probabilis
 
 | Source | Data | API |
 |---|---|---|
-| [energy-charts.info](https://api.energy-charts.info) | DAA prices, load, wind/solar/hydro generation | Free, no key |
+| [ENTSOE Transparency Platform](https://transparency.entsoe.eu) | DAA prices, load, generation per type, cross-border physical flows | Free, key required — set `ENTSOE_TOKEN` in `.env` |
 | [Open-Meteo](https://open-meteo.com) | Temperature, wind speed, solar radiation | Free, no key |
 | yfinance `TTF=F` | TTF natural gas futures (EUR/MWh) | Free, no key |
 | yfinance `KRBN` | EU carbon price proxy (EUA ETF) | Free, no key |
+| [energy-charts.info](https://api.energy-charts.info) | Fallback for prices + generation (rate-limited, no key) | Free, no key |
 
-Weather stations: Frankfurt (DE-LU), Madrid (ES). Training window: 2021–2026.
-
----
-
-## Data pipeline
-
-```
-Stage 1  ingestion.py    → data/raw/          raw CSVs, no modification
-Stage 2  cleaning.py     → data/clean/        UTC timestamps, hourly freq, gap interpolation
-Stage 3  alignment.py    → data/aligned/      joined on common (timestamp, zone) index
-Stage 4  features.py     → data/processed/    derived features, circular encoding, lags
-Stage 5  validation.py                        asserts no NaN, continuous timestamps, sane ranges
-```
-
-### Running
-
-All scripts run from `src/`:
-
-```bash
-pip install -r requirements.txt
-cd src
-
-python pipeline.py              # full pipeline (~20 min, API rate limits)
-python pipeline.py --from-clean # skip ingestion (raw CSVs exist)
-python pipeline.py --from-align # skip ingestion + cleaning
-python pipeline.py --validate-only
-```
-
-### Loading the dataset
-
-```python
-import pandas as pd
-
-df = pd.read_parquet("data/processed/final_dataset.parquet")
-
-delu = df.xs("DE-LU", level="zone")
-es   = df.xs("ES",    level="zone")
-```
+Weather stations: Frankfurt (DE-LU), Madrid (ES). Training window: 2021–present.
 
 ---
 
 ## Dataset schema
 
-`data/processed/final_dataset.parquet` — **93,152 rows × 30 columns**, MultiIndex `(timestamp UTC, zone)`.
+`data/processed/final_dataset.parquet` — MultiIndex `(timestamp UTC, zone)`.
 
-| Column | Description |
-|---|---|
-| `price` | Day-ahead price EUR/MWh — target variable |
-| `load` | Total grid load MW |
-| `wind_generation` | Wind output MW (offshore + onshore summed) |
-| `solar_generation` | Solar output MW |
-| `hydro_generation` | Hydro output MW (run-of-river + reservoir + pumped) |
-| `temperature` | °C at representative city (Frankfurt / Madrid) |
-| `wind_speed` | m/s |
-| `solar_radiation` | W/m² |
-| `gas_price` | TTF natural gas EUR/MWh (daily, forward-filled hourly) |
-| `carbon_price` | EUA proxy via KRBN ETF (daily, forward-filled hourly) |
-| `residual_load` | load − wind − solar, clipped ≥ 0 |
-| `renewable_penetration` | (wind + solar) / load, clipped [0, 1] |
-| `hour`, `weekday`, `month`, `week_of_year` | Temporal features (raw integers) |
-| `hour_sin/cos`, `weekday_sin/cos`, `month_sin/cos`, `week_sin/cos` | Circular encoding — makes periodicity continuous for tree/NN models |
-| `is_holiday` | Public holiday flag (zone-specific: DE for DE-LU, ES for ES) |
-| `lag_1`, `lag_24`, `lag_168` | Price lags 1h / 24h / 7d — computed per zone, no cross-zone leakage |
-| `price_roll_24h`, `price_roll_168h` | Rolling price means 24h / 168h |
+| Column | Source | Description |
+|---|---|---|
+| `price` | ENTSOE | Target variable, EUR/MWh |
+| `load` | ENTSOE | Total grid load, MW |
+| `wind_generation` | ENTSOE | Wind output MW (offshore + onshore summed) |
+| `solar_generation` | ENTSOE | Solar output, MW |
+| `hydro_generation` | ENTSOE | Hydro output MW (run-of-river + reservoir + pumped) |
+| `net_imports` | ENTSOE | Net cross-border imports MW — positive = net importer |
+| `temperature` | Open-Meteo | °C at Frankfurt / Madrid |
+| `wind_speed` | Open-Meteo | m/s |
+| `solar_radiation` | Open-Meteo | W/m² |
+| `gas_price` | yfinance TTF=F | EUR/MWh, daily forward-filled to hourly |
+| `carbon_price` | yfinance KRBN | EUA proxy USD, daily forward-filled to hourly |
+| `residual_load` | derived | load − wind − solar, clipped ≥ 0 |
+| `renewable_penetration` | derived | (wind + solar) / load, clipped [0, 1] |
+| `hour_sin/cos`, `weekday_sin/cos`, `month_sin/cos`, `week_sin/cos` | derived | Circular encoding of cyclic calendar features |
+| `is_holiday` | derived | Public holiday flag, zone-specific (DE / ES) |
+| `lag_1`, `lag_24`, `lag_168` | derived | Price lags 1h / 24h / 7d — per-zone only, no cross-zone leakage |
+| `price_roll_24h`, `price_roll_168h` | derived | Rolling price means 24h / 168h |
 
 ---
 
@@ -90,26 +126,26 @@ es   = df.xs("ES",    level="zone")
 Feature importance is consistent across the literature (Tschora 2024, ENTSO-E run on 2024–2026 DE-LU data):
 
 **Permutation / SHAP ranking for DE-LU:**
-1. `load` / `load_forecast` — single largest signal; demand directly sets the clearing level
+1. `load` — single largest signal; demand directly sets the clearing level
 2. `lag_24` (D-1 price, same hour) — price momentum; strongest autoregressive effect
 3. `wind_generation` — high wind → low or negative prices
 4. `solar_generation` — solar saturation drives the worst negative-price spikes
 5. `lag_168` (D-7), `hour`, `weekday` — weekly seasonality and daily shape
 6. `gas_price` — matters structurally but noisy in high-volatility regimes
-7. `is_holiday`, `month` — minor on average; `is_holiday` critical for tail events
+7. `is_holiday`, `month` — minor on average; `is_holiday` critical for tail events (e.g. May 1 solar saturation: −€500)
 
 **German vs Spanish market dynamics:**
-- DE-LU is thermal + renewable driven. Renewables intermittency causes negative prices (saw -€500 floor on 2026-05-01 Labor Day). Gas price and renewable forecast matter most.
-- ES is more hydro-modulated. Consumption is heat-sensitive (cooling load in summer). Renewable penetration is high but network is less coupled to central Europe.
+- DE-LU is thermal + renewable driven. Renewables intermittency causes negative prices. Gas price and wind forecast matter most.
+- ES is more hydro-modulated. Consumption is heat-sensitive (cooling load in summer). High solar penetration but isolated grid — Pyrenees bottleneck ~2.8 GW to France means cross-border smoothing is limited.
 
 **On the lag structure:**
-D-1 (lag_24h) and D-7 (lag_168h) carry almost all autocorrelation signal. D-2 and D-3 lags contribute <5% of SHAP weight — not worth the feature cost.
+D-1 (lag_24h) and D-7 (lag_168h) carry almost all autocorrelation signal. D-2 and D-3 lags contribute <5% of SHAP weight — not included.
 
 **On probabilistic calibration:**
-Raw quantile regression is structurally undercovered (~53% empirical coverage claiming 80%). Conformalized Quantile Regression (CQR) on a held-out calibration slice pulled coverage to ~71%. Remaining gap is seasonal distribution shift between calibration and evaluation windows — Mondrian conformal or adaptive conformal closes it.
+Raw quantile regression empirical coverage is ~82–88% against a nominal p025–p975 band (target 95%). Gap is explained by seasonal distribution shift between training and evaluation windows. CQR on a held-out calibration slice is the planned fix.
 
-**Tail risk:**
-The five worst single-hour errors are all renewables-saturation events on holidays/weekends (solar ~50 GW, depressed industrial demand). The model correctly identifies the direction (negative) but underestimates the magnitude. This is a known structural limitation of median-honest models trained on MAE/pinball loss.
+**On cross-border flows:**
+`net_imports` captures interconnection pressure: high net imports signal demand exceeds local supply (upward price pressure), high net exports signal local surplus (downward). For DE-LU this is a strong signal (8 neighbors, significant MW flows). For ES it is weaker (2 neighbors, constrained capacity) but still informative at the margin.
 
 ---
 
@@ -117,24 +153,18 @@ The five worst single-hour errors are all renewables-saturation events on holida
 
 ```
 src/
-  config.py       zones, paths, API params, date ranges, eval window
-  ingestion.py    fetch raw data from three APIs
-  cleaning.py     UTC timestamps, hourly reindex, linear interpolation
-  alignment.py    join sources on (timestamp, zone) MultiIndex
+  config.py       zones, paths, ENTSOE token (from env), date ranges
+  ingestion.py    ENTSOE primary + energy-charts fallback + Open-Meteo + yfinance
+  cleaning.py     UTC timestamps, hourly reindex, interpolation, ENTSOE + EC cleaners
+  alignment.py    join sources on (timestamp, zone) MultiIndex; net_imports joined if present
   features.py     derived features, circular encoding, lags, holiday flag
   validation.py   hard assertions on final dataset quality
-  pipeline.py     orchestrator with --from-* resume flags
+  pipeline.py     orchestrator with --from-* resume flags; auto-loads .env
+  model.py        quantile LightGBM training, validation, eval-window prediction
 
-notebooks/        exploratory analysis, model development (to come)
+notebooks/
+  gen_notebook.py run this to generate model.ipynb (submission notebook)
+
+predictions.csv   current best submission (30 rows, eval window)
+.env.example      copy to .env and set ENTSOE_TOKEN
 ```
-
----
-
-## Next steps
-
-- [ ] Quantile model (LightGBM at q=0.025, 0.45, 0.975) per zone
-- [ ] Conformal calibration (CQR) on a held-out calibration slice
-- [ ] Recursive lag-gap fill for evaluation window (lag_1, lag_24 require D-1 actuals)
-- [ ] Neighbor price features (FR, PT for ES; NL, CH for DE-LU) — thesis finds ~15% gain potential
-- [ ] Gas price feature: consider switching from D-2 TTF to a spot proxy less susceptible to crisis volatility
-- [ ] Holiday-aware conformal band (Mondrian) to close coverage gap in tail events
