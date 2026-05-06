@@ -54,14 +54,14 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 ### What needs to happen next
 
 **Must-do before submission:**
-- [ ] Re-run full pipeline with ENTSOE as source to pull in `net_imports` for all training years, then retrain model — current predictions.csv was generated without this feature
+- [x] ~~Re-run full pipeline with ENTSOE as source~~ — **done**. `net_imports` now in all training years. Pipeline re-run with chunk-boundary gap fix (21h gaps at 180-day boundaries now interpolated).
 - [ ] Build `model.ipynb` submission notebook — `notebooks/gen_notebook.py` is ready, run it to generate the notebook skeleton, then fill in output cells
 - [ ] Package `data.zip` with all data files used + README.txt describing each file
 
 **High-value improvements:**
 - [x] ~~Conformalized Quantile Regression (CQR)~~ — **done**. Coverage corrected to 95% on both zones. Calibration set Jan–May 2026 (n≈2992/zone). See `calibrate_zone()` in `src/model.py`.
-- [ ] Open-Meteo weather forecast for eval window — currently using seasonal same-weekday-hour proxy; actual 10-day forecast available free. Replace proxy in `build_eval_row` for better eval-window accuracy.
-- [ ] Eval window: fetch ENTSOE actual cross-border flows for May 1–7 (they exist now) so `net_imports` lags are real values not proxies.
+- [x] ~~Open-Meteo weather forecast for eval window~~ — **done**. `fetch_weather_forecast()` called automatically by `model.py --predict`; replaces seasonal proxy for temperature/wind/solar_radiation on all eval slots.
+- [x] ~~ENTSOE actual cross-border flows for gap period~~ — **done**. `fetch_gap_actuals()` in `model.py` fetches prices + net_imports for the gap between training tail and eval start; lag_24 lookups use real values.
 
 **Worth exploring if time allows:**
 - [ ] Mondrian conformal bands — holiday-aware calibration to tighten intervals on normal hours without widening tail-event hours. Closes the remaining coverage gap from seasonal distribution shift.
@@ -87,8 +87,14 @@ python pipeline.py --from-clean # skip ingestion (raw CSVs already exist)
 python pipeline.py --from-align # skip ingestion + cleaning
 python pipeline.py --validate-only
 
-# Train model and generate predictions:
+# Train model and generate predictions (hackathon eval window):
 python model.py --predict
+
+# Predict any arbitrary window (e.g. run on May 10 to get May 11-12):
+python model.py --predict --start "2026-05-10 17:00" --end "2026-05-12 22:00"
+
+# Backtest against known prices (actuals auto-reported if window overlaps dataset):
+python model.py --predict --start "2025-06-01 00:00" --end "2025-06-02 23:00"
 ```
 
 ---
@@ -154,7 +160,7 @@ Feature importance is consistent across the literature (Tschora 2024, ENTSO-E ru
 D-1 (lag_24h) and D-7 (lag_168h) carry almost all autocorrelation signal. D-2 and D-3 lags contribute <5% of SHAP weight — not included.
 
 **On probabilistic calibration:**
-Raw quantile regression empirical coverage is ~82–88% against a nominal p025–p975 band (target 95%). Gap is explained by seasonal distribution shift between training and evaluation windows. CQR on a held-out calibration slice is the planned fix.
+Raw quantile regression empirical coverage is ~82–88% against a nominal p025–p975 band (target 95%). Gap is explained by seasonal distribution shift between training and evaluation windows. CQR on a Jan–May 2026 calibration set corrects this to exactly 95% on both zones — see `calibrate_zone()` in `src/model.py`.
 
 **On cross-border flows:**
 `net_imports` captures interconnection pressure: high net imports signal demand exceeds local supply (upward price pressure), high net exports signal local surplus (downward). For DE-LU this is a strong signal (8 neighbors, significant MW flows). For ES it is weaker (2 neighbors, constrained capacity) but still informative at the margin.
@@ -172,11 +178,14 @@ src/
   features.py     derived features, circular encoding, lags, holiday flag
   validation.py   hard assertions on final dataset quality
   pipeline.py     orchestrator with --from-* resume flags; auto-loads .env
-  model.py        quantile LightGBM training, validation, eval-window prediction
+  model.py        quantile LightGBM training, CQR calibration, flexible prediction
+                  (--start/--end for any window; backtest if actuals exist; gap fetch + weather forecast automatic)
 
 notebooks/
-  gen_notebook.py run this to generate model.ipynb (submission notebook)
+  gen_notebook.py  run this to generate model.ipynb (submission notebook)
+  gen_playground.py run this to regenerate playground.ipynb
+  playground.ipynb  36-cell exploration notebook covering every pipeline layer
 
-predictions.csv   current best submission (30 rows, eval window)
+predictions.csv   current best submission (30 rows, eval window, CQR-calibrated)
 .env.example      copy to .env and set ENTSOE_TOKEN
 ```
