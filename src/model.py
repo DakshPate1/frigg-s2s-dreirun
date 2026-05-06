@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import warnings
 from pathlib import Path
 
@@ -20,6 +21,14 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 from sklearn.metrics import mean_pinball_loss
+
+# Load .env so ENTSOE_TOKEN is available when model.py is run standalone
+_env_file = Path(__file__).parent.parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        if _line.strip() and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -221,6 +230,79 @@ def calibrate_zone(zdf: pd.DataFrame, qmodels: dict, zone: str) -> dict:
     return {"interval": q_hat_iv, "p50": q_hat_50, "n": n}
 
 
+# ── Gap actuals fetch ─────────────────────────────────────────────────────────
+
+def fetch_gap_actuals(zone: str, gap_start: pd.Timestamp, gap_end: pd.Timestamp) -> pd.DataFrame:
+    """
+    Fetch prices + net_imports from ENTSOE for the period between training data
+    and the eval window (typically the last 1–2 days not yet in final_dataset.parquet).
+
+    Only price and net_imports are populated; all other columns are NaN so the
+    existing proxy logic in build_eval_row handles generation/weather features.
+
+    Called automatically when --predict is used if a gap exists.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from config import ENTSOE_TOKEN, ENTSOE_ZONES, ENTSOE_NEIGHBORS
+
+    if not ENTSOE_TOKEN:
+        log.warning("ENTSOE_TOKEN not set — skipping gap actuals fetch")
+        return pd.DataFrame()
+
+    try:
+        from entsoe import EntsoePandasClient
+    except ImportError:
+        log.warning("entsoe-py not installed — skipping gap actuals fetch")
+        return pd.DataFrame()
+
+    client    = EntsoePandasClient(api_key=ENTSOE_TOKEN)
+    eic       = ENTSOE_ZONES[zone]
+    neighbors = ENTSOE_NEIGHBORS[zone]
+
+    # ENTSOE queries need tz-aware Timestamps; use Brussels (CET/CEST) like ingestion.py
+    q_start = pd.Timestamp(gap_start.date().isoformat(), tz="Europe/Brussels")
+    q_end   = pd.Timestamp((gap_end + pd.Timedelta(days=1)).date().isoformat(), tz="Europe/Brussels")
+
+    # ── Prices ────────────────────────────────────────────────────────────────
+    try:
+        prices = client.query_day_ahead_prices(eic, start=q_start, end=q_end)
+        prices = prices.tz_convert("UTC")
+        if prices.index.to_series().diff().dropna().min() < pd.Timedelta("1h"):
+            prices = prices.resample("h").mean()
+        prices.name = "price"
+        log.info("  Gap prices %s: %d rows", zone, len(prices))
+    except Exception as exc:
+        log.warning("Gap prices fetch %s failed: %s", zone, exc)
+        return pd.DataFrame()
+
+    gap_df = prices.to_frame()
+
+    # ── Cross-border flows → net_imports ──────────────────────────────────────
+    net_parts: list[pd.Series] = []
+    for nbr_eic in neighbors:
+        try:
+            imp = client.query_crossborder_flows(nbr_eic, eic, start=q_start, end=q_end)
+            exp = client.query_crossborder_flows(eic, nbr_eic, start=q_start, end=q_end)
+            imp = imp.tz_convert("UTC").resample("h").mean()
+            exp = exp.tz_convert("UTC").resample("h").mean()
+            net_parts.append(imp.sub(exp, fill_value=0.0))
+        except Exception:
+            pass
+
+    if net_parts:
+        net_imports = pd.concat(net_parts, axis=1).sum(axis=1)
+        net_imports.name = "net_imports"
+        gap_df = gap_df.join(net_imports, how="left")
+        log.info("  Gap net_imports %s: %d non-null", zone, gap_df["net_imports"].notna().sum())
+    else:
+        log.warning("  No cross-border flow data for gap period (%s) — net_imports will be NaN", zone)
+
+    # Clip to exact requested window
+    gap_df = gap_df.loc[(gap_df.index >= gap_start) & (gap_df.index < gap_end)]
+    return gap_df
+
+
 # ── Eval-window feature construction ─────────────────────────────────────────
 
 def build_eval_row(
@@ -341,6 +423,19 @@ def main(predict: bool = False) -> None:
     zone_preds = {}
     for zone in ZONES:
         zdf = df.xs(zone, level="zone").sort_index()
+
+        # Patch zdf with gap actuals: prices + net_imports for any hours between
+        # training tail and eval start (typically the most recent 1–2 days).
+        # This gives lag_24 lookups real values instead of falling back to averages.
+        gap_start = zdf.index[-1] + pd.Timedelta(hours=1)
+        if gap_start < eval_start:
+            log.info("Fetching gap actuals for %s (%s → %s) ...", zone, gap_start.date(), eval_start.date())
+            gap_df = fetch_gap_actuals(zone, gap_start, eval_start)
+            if len(gap_df) > 0:
+                zdf = pd.concat([zdf, gap_df])
+                zdf = zdf[~zdf.index.duplicated(keep="last")].sort_index()
+                log.info("  zdf extended: tail now %s", zdf.index[-1])
+
         ref = zdf[eval_start - pd.Timedelta(weeks=4) : eval_start - pd.Timedelta(hours=1)]
         cal = hdays.country_holidays(_ZONE_COUNTRY[zone])
 
