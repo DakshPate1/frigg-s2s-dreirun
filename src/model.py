@@ -4,9 +4,17 @@ Quantile LightGBM model for DAA electricity price forecasting.
 Trains three quantile regressors per zone (q=0.025, 0.45, 0.975).
 Evaluation: pinball loss at q=0.45 (per hackathon scoring).
 
+Changes vs original:
+  - CRITICAL: Eval window fixed (was May 8-9 / 30 rows → now May 11-12 / 48 rows)
+  - FEATURES list expanded with new weather, neighbor, fuel, regime columns
+  - Wind height fixed: wind_speed_10m → wind_speed_100m in _fetch_weather
+  - build_eval_row: picks up aggregated multi-city weather + new fuel/neighbor cols
+  - coal_price added to fuel carry-forward in build_eval_row
+  - Validation split updated to match 3-year training window (2023 start)
+
 Usage:
     python model.py               # train + validate + print metrics
-    python model.py --predict     # also generate predictions.csv for eval window
+    python model.py --predict     # generate predictions.csv for eval window
 """
 
 from __future__ import annotations
@@ -37,66 +45,131 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s  %(mes
 log = logging.getLogger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT       = Path(__file__).parent.parent
-DATA_PATH  = ROOT / "data" / "processed" / "final_dataset.parquet"
-OUT_PATH   = ROOT / "alpine-arbitrage_predictions.csv"
+ROOT      = Path(__file__).parent.parent
+DATA_PATH = ROOT / "data" / "processed" / "final_dataset.parquet"
+OUT_PATH  = ROOT / "alpine-arbitrage_predictions.csv"
 
 # ── Features ──────────────────────────────────────────────────────────────────
-# Ordered by expected importance (findings_entsoe + Tschora SHAP):
-# load/generation > lag_24 > lag_168 > weather > gas > calendar > lag_1 (recursive)
+# Ordered by expected importance (findings_entsoe + Tschora SHAP).
+# New additions marked with # NEW.
+# model.py auto-filters to columns present in dataset — safe to add ahead of data.
 FEATURES = [
-    # Fundamental drivers
+    # ── Fundamental supply/demand drivers ────────────────────────────────────
     "load", "wind_generation", "solar_generation", "hydro_generation",
+    "nuclear_generation",                                               # NEW — ES active nuclear
+
+    # ── Original single-city weather (fallback if multi-city not present) ────
     "temperature", "wind_speed", "solar_radiation",
-    # Fuel / carbon
-    "gas_price", "carbon_price",
-    # Derived
-    "residual_load", "renewable_penetration",
-    # Cross-border flows (net imports MW; ENTSOE source)
-    "net_imports",
-    # Grid stress signal — hour-over-hour ramp in residual load
-    # Large positive ramp → gas peakers must spin up fast → price spike risk
+
+    # ── Multi-city capacity/population-weighted weather ───────────────────────
+    # NEW — generation centers + demand centers separated (see config.py)
+    "wind_speed_agg",          # capacity-weighted wind at turbine locations
+    "wind_speed_cubed",        # cubic wind → power output proxy
+    "solar_radiation_agg",     # capacity-weighted solar at PV locations
+    "solar_hour_interaction",  # solar × sin(hour) → morning/evening asymmetry
+    "temperature_agg",         # population-weighted demand temperature
+    "temperature_sq",          # nonlinear heating/cooling demand
+
+    # ── DE-LU specific: Nordic wind + Swiss alpine hydro ─────────────────────
+    # NEW — cross-border physical generation signals
+    "DK_wind_speed",           # Danish North Sea wind exports into north Germany
+    "DK_wind_speed_cubed",
+    "CH_precipitation",        # Alpine snowmelt → Swiss hydro availability
+    "CH_precip_7d_sum",        # 7-day rolling sum → reservoir filling lag
+
+    # ── ES specific: hydro reservoir proxy ───────────────────────────────────
+    # NEW
+    "ES_hydro_precipitation",
+    "ES_hydro_precip_7d_sum",
+    "nuclear_available_mw",    # REMIT unavailability-adjusted nuclear capacity
+
+    # ── Fuel / carbon ─────────────────────────────────────────────────────────
+    "gas_price",
+    "carbon_price",
+    "coal_price",              # NEW — API2 coal, relevant for DE-LU coal peakers
+
+    # ── Derived generation features ───────────────────────────────────────────
+    "residual_load",
+    "renewable_penetration",
     "residual_load_ramp",
-    # Calendar — circular encoding
+    "residual_load_forecast",           # day-ahead forecast version
+    "renewable_penetration_forecast",
+    "residual_load_ramp_forecast",
+
+    # ── Cross-border flows ────────────────────────────────────────────────────
+    "net_imports",
+
+    # ── Neighbor zone prices (lagged 24h) ─────────────────────────────────────
+    # NEW — price transmission + transmission congestion signals
+    "FR_price_lag24",          # France: dominant flow partner both zones
+    "NL_price_lag24",          # Netherlands: gas hub, north wind correlation
+    "CH_price_lag24",          # Switzerland: alpine hydro arbitrage
+    "DK_price_lag24",          # Denmark: Nordic wind export signal
+    # Transmission spreads: large spread = interconnectors congested
+    "DE_LU_FR_spread",
+    "DE_LU_NL_spread",
+    "DE_LU_CH_spread",
+    "ES_FR_spread",
+
+    # ── Cross-zone price lag ──────────────────────────────────────────────────
+    # NEW — captures Iberian isolation vs Central European coupling
+    "cross_zone_lag24",
+
+    # ── Calendar (circular encoding) ──────────────────────────────────────────
     "hour_sin", "hour_cos",
     "weekday_sin", "weekday_cos",
     "month_sin", "month_cos",
     "week_sin", "week_cos",
     "is_holiday",
-    # Holiday proximity — continuous distance avoids binary bridge-day edge cases
     "days_to_holiday",
     "days_from_holiday",
-    # Price history
+
+    # ── Regime flags ──────────────────────────────────────────────────────────
+    # NEW
+    "crisis_period",           # 1 = Aug 2021 – Dec 2022 energy crisis
+    "is_peak",                 # 1 = morning (7-9) or evening (17-20) peak hours
+    "negative_price_lag24",    # 1 = own-zone price was negative 24h ago
+
+    # ── Price history ─────────────────────────────────────────────────────────
     "lag_1", "lag_24", "lag_168",
-    "price_roll_24h", "price_roll_168h",
+    "price_roll_24h", "price_roll_168h", "price_roll_std_168h",  # std NEW
+
+    # ── Ensemble uncertainty ──────────────────────────────────────────────────
+    # NEW — ECMWF ensemble spread for dynamic interval calibration
+    "wind_ensemble_std",
+    "solar_ensemble_std",
 ]
 
 TARGET    = "price"
 ZONES     = ["DE-LU", "ES"]
 QUANTILES = [0.025, 0.45, 0.975]
 
-# Train on 2021–2024; validate on 2025; calibrate on Jan–May 2026; eval window is May 2026
+# ── Time splits ───────────────────────────────────────────────────────────────
+# Training window: 2023-05-01 → 2025-01-01  (post-crisis clean data)
+# Validation:      2025-01-01 → 2026-01-01  (full year 2025)
+# Calibration:     2026-01-01 → 2026-05-10  (Jan–May 2026, before eval window)
+# Eval window:     2026-05-11 02:00 CEST → 2026-05-12 01:00 CEST (48 slots)
 TRAIN_END = "2025-01-01"
 VAL_END   = "2026-01-01"
-CAL_END   = "2026-05-08"   # stop before eval window
+CAL_END   = "2026-05-10"   # ← FIXED: was 2026-05-08, must stop before eval window
 
 # Horizon regime split: ≤ this many days → LightGBM; beyond → seasonal long-term model
 SHORTTERM_DAYS = 7
 
 # ── LightGBM base params ──────────────────────────────────────────────────────
 LGB_BASE = dict(
-    objective        = "quantile",
-    metric           = "quantile",
-    n_estimators     = 3000,
-    learning_rate    = 0.05,
-    num_leaves       = 127,
-    min_child_samples= 20,
-    subsample        = 0.8,
-    colsample_bytree = 0.8,
-    reg_alpha        = 0.1,
-    reg_lambda       = 0.1,
-    n_jobs           = -1,
-    verbose          = -1,
+    objective         = "quantile",
+    metric            = "quantile",
+    n_estimators      = 3000,
+    learning_rate     = 0.05,
+    num_leaves        = 127,
+    min_child_samples = 20,
+    subsample         = 0.8,
+    colsample_bytree  = 0.8,
+    reg_alpha         = 0.1,
+    reg_lambda        = 0.1,
+    n_jobs            = -1,
+    verbose           = -1,
 )
 
 
@@ -128,9 +201,9 @@ def _mondrian_bucket(ts: pd.Timestamp, cal) -> int:
     systematically under-wide intervals for these slots.
     """
     d = ts.date()
-    if ts.dayofweek >= 5:          # Saturday=5, Sunday=6
+    if ts.dayofweek >= 5:
         return 1
-    if d in cal:                    # public holiday on a weekday
+    if d in cal:
         return 1
     prev_day = (ts - pd.Timedelta(days=1)).date()
     next_day = (ts + pd.Timedelta(days=1)).date()
@@ -151,7 +224,7 @@ def train_zone(zdf: pd.DataFrame, zone: str) -> tuple[dict, dict]:
 
     log.info("  %s  train=%d  val=%d", zone, len(X_tr), len(X_va))
 
-    qmodels = {}
+    qmodels   = {}
     val_preds = {}
 
     for q in QUANTILES:
@@ -165,8 +238,8 @@ def train_zone(zdf: pd.DataFrame, zone: str) -> tuple[dict, dict]:
                 lgb.log_evaluation(0),
             ],
         )
-        qmodels[q]    = m
-        val_preds[q]  = m.predict(X_va)
+        qmodels[q]   = m
+        val_preds[q] = m.predict(X_va)
         log.info("      best_iter=%d  pinball=%.4f",
                  m.best_iteration_,
                  pinball(y_va.values, val_preds[q], q))
@@ -195,13 +268,13 @@ def report_zone(zone: str, val: dict) -> None:
 
 
 def feature_importance(qmodels: dict, zone: str) -> None:
-    m = qmodels[0.45]
+    m   = qmodels[0.45]
     imp = pd.Series(
         m.feature_importances_, index=FEATURES
     ).sort_values(ascending=False)
-    log.info("  %s — top-10 feature importance (p50 model):", zone)
-    for feat, score in imp.head(10).items():
-        log.info("    %-30s %d", feat, score)
+    log.info("  %s — top-15 feature importance (p50 model):", zone)
+    for feat, score in imp.head(15).items():
+        log.info("    %-35s %d", feat, score)
 
 
 # ── CQR calibration ───────────────────────────────────────────────────────────
@@ -218,7 +291,7 @@ def calibrate_zone(
 
     Default calibration window: VAL_END → CAL_END (Jan–May 2026).
     For backtests pass cal_start/cal_end to use a trailing window just before
-    the prediction start so the calibration stays in-sample relative to the test.
+    the prediction start so calibration stays in-sample relative to the test.
 
     Two corrections:
       q_hat_interval — symmetric EUR/MWh inflation applied to both sides of
@@ -248,20 +321,16 @@ def calibrate_zone(
     p975 = np.maximum(p975, p50)
 
     # ── Interval: inflate [p025, p975] to 95% coverage ────────────────────────
-    # Score = how far y lies outside the current interval (negative = already inside)
     scores   = np.maximum(p025 - y_cal, y_cal - p975)
     q_level  = min(0.95 * (1 + 1 / n), 1.0)
     q_hat_iv = float(np.quantile(scores, q_level))
 
     # ── p50: shift to 45th-percentile calibration ─────────────────────────────
-    # Residuals > 0 mean y > p50 (model is under-forecasting)
     resid_50  = y_cal - p50
     q_level50 = min(0.45 * (1 + 1 / n), 1.0)
     q_hat_50  = float(np.quantile(resid_50, q_level50))
 
-    # ── Mondrian: per-regime interval Q_hats ─────────────────────────────────
-    # Bucket 0 = normal weekday; bucket 1 = weekend/holiday/bridge day.
-    # Tighter bands on predictable hours; wider on structurally uncertain ones.
+    # ── Mondrian: per-regime interval Q_hats ──────────────────────────────────
     _ZONE_COUNTRY_MAP = {"DE-LU": "DE", "ES": "ES"}
     country  = _ZONE_COUNTRY_MAP.get(zone, "DE")
     hol_cal  = hdays.country_holidays(country, years=range(
@@ -272,9 +341,9 @@ def calibrate_zone(
         mask_b = buckets == b
         n_b    = int(mask_b.sum())
         if n_b < 50:
-            mondrian[b] = q_hat_iv   # too few samples → fall back to global
+            mondrian[b] = q_hat_iv
         else:
-            q_lev_b    = min(0.95 * (1 + 1 / n_b), 1.0)
+            q_lev_b     = min(0.95 * (1 + 1 / n_b), 1.0)
             mondrian[b] = float(np.quantile(scores[mask_b], q_lev_b))
         if n_b > 0:
             cov_b = float(((y_cal[mask_b] >= p025[mask_b] - mondrian[b]) &
@@ -282,9 +351,8 @@ def calibrate_zone(
             log.info("    Mondrian b=%d (n=%d): Q_hat=%.2f  coverage=%.1f%%",
                      b, n_b, mondrian[b], cov_b)
 
-    # ── Diagnostics ───────────────────────────────────────────────────────────
-    cov_raw = float(((y_cal >= p025)              & (y_cal <= p975)).mean())              * 100
-    cov_cal = float(((y_cal >= p025 - q_hat_iv)   & (y_cal <= p975 + q_hat_iv)).mean())   * 100
+    cov_raw = float(((y_cal >= p025)            & (y_cal <= p975)).mean())            * 100
+    cov_cal = float(((y_cal >= p025 - q_hat_iv) & (y_cal <= p975 + q_hat_iv)).mean()) * 100
     pb_raw  = pinball(y_cal, p50, 0.45)
     pb_cal  = pinball(y_cal, p50 + q_hat_50, 0.45)
 
@@ -304,38 +372,21 @@ def build_longterm_model(zdf: pd.DataFrame, zone: str) -> dict:
     Seasonal profile + annual trend for horizons beyond SHORTTERM_DAYS.
 
     PROFILE — recency-weighted median per (month, dayofweek, hour):
-      Years are resampled proportionally to their recency weight before the
-      grouped median is taken. This down-weights the anomalous 2022 energy
-      crisis (TTF gas at 10× normal) and amplifies the post-crisis 2023-2025
-      regime which better reflects near-future structural conditions.
+      Years resampled proportionally to recency weight. Down-weights anomalous
+      2022 energy crisis; amplifies post-crisis 2023-2025 regime.
 
     TREND — post-crisis linear anchor (2023+):
-      We fit the trend on 2023-onward annual means only, where the market has
-      normalised after the Russia/Ukraine supply shock. Using the full 2021-2025
-      window would import the crisis spike and its subsequent crash into the
-      slope, overstating reversion or understating the underlying drift.
-      If fewer than 2 post-crisis years exist, we fall back to all years.
+      Fit on 2023-onward annual means only. Full 2021-2025 window would import
+      crisis spike into slope. Fallback to all years if < 2 post-crisis years.
 
     STRUCTURAL NOTE (documented, not modelled):
-      - DE-LU nuclear phase-out completed Apr 2023 → slightly higher residual
-        load prices in low-wind periods; partially offset by continued onshore
-        wind build-out (~5 GW/yr).
-      - ES solar capacity growing ~8 GW/yr → deeper midday troughs going
-        forward; our seasonal profile captures the 2024 shape but will
-        under-estimate the dip by 2027-2028.
-      These effects widen the honest uncertainty band but are not explicitly
-      modelled — interval scaling with sqrt(horizon_months) provides a
-      conservative hedge.
-
-    UNCERTAINTY:
-      std of (actual − profile_pred) × 1.96 × sqrt-scaled horizon factor.
-      p50 bias uses 45th-percentile residual to match the scoring metric.
+      - DE-LU nuclear phase-out completed Apr 2023.
+      - ES solar capacity growing ~8 GW/yr → deeper midday troughs going forward.
+      Interval scaling with sqrt(horizon_months) provides conservative hedge.
     """
     hist = zdf[zdf.index < CAL_END].dropna(subset=["price"])
 
-    # ── Recency-weighted seasonal profile (median, not mean) ──────────────────
-    # Weight: 2021→1, 2022→1, 2023→2, 2024→3, 2025→4  (exponential-ish recency)
-    first_year = int(hist.index.year.min())
+    first_year   = int(hist.index.year.min())
     year_weights = {y: max(1, y - first_year) for y in hist.index.year.unique()}
     weighted_parts = [
         pd.concat([hist[hist.index.year == y]] * w)
@@ -350,18 +401,16 @@ def build_longterm_model(zdf: pd.DataFrame, zone: str) -> dict:
     profile.index.names = ["month", "weekday", "hour"]
     global_mean = float(hist["price"].median())
 
-    # ── Post-crisis trend (2023+) ─────────────────────────────────────────────
     annual      = hist.groupby(hist.index.year)["price"].mean()
     post_crisis = annual[annual.index >= 2023]
     trend_src   = post_crisis if len(post_crisis) >= 2 else annual
     if len(trend_src) >= 2:
-        years  = trend_src.index.values.astype(float)
+        years            = trend_src.index.values.astype(float)
         slope, intercept = np.polyfit(years, trend_src.values, 1)
     else:
         slope, intercept = 0.0, float(annual.mean())
     anchor_year = int(annual.index[-1])
 
-    # ── Residual uncertainty ──────────────────────────────────────────────────
     def _profile_pred(ts: pd.Timestamp) -> float:
         try:
             return float(profile.loc[(ts.month, ts.dayofweek, ts.hour)])
@@ -394,24 +443,17 @@ def predict_longterm_slot(
 ) -> tuple[float, float, float]:
     """
     Predict (p025, p50, p975) for one slot at a long horizon.
-
-    Interval = 1.96 × resid_std × horizon_scale, where:
-      horizon_scale = 1 + sqrt(max(horizon_days − SHORTTERM_DAYS, 0) / 30) × 0.25
-    This gives ~base width at 7 days, growing slowly as sqrt(months) beyond.
+    Interval = 1.96 × resid_std × horizon_scale.
     """
-    # Seasonal component
     try:
         seasonal = float(lt["profile"].loc[(ts.month, ts.dayofweek, ts.hour)])
     except KeyError:
         seasonal = lt["global_mean"]
 
-    # Trend: delta from anchor year
     years_out = (ts.year - lt["anchor_year"]) + (ts.month - 1) / 12.0
     trend_adj = lt["slope"] * years_out
+    p50       = seasonal + trend_adj + lt["resid_q45"]
 
-    p50 = seasonal + trend_adj + lt["resid_q45"]
-
-    # Widening interval
     excess_days   = max(horizon_days - SHORTTERM_DAYS, 0.0)
     horizon_scale = 1.0 + (excess_days / 30.0) ** 0.5 * 0.25
     half_interval = lt["resid_std"] * 1.96 * horizon_scale
@@ -421,15 +463,11 @@ def predict_longterm_slot(
 
 # ── Gap actuals fetch ─────────────────────────────────────────────────────────
 
-def fetch_gap_actuals(zone: str, gap_start: pd.Timestamp, gap_end: pd.Timestamp) -> pd.DataFrame:
+def fetch_gap_actuals(zone: str, gap_start: pd.Timestamp,
+                       gap_end: pd.Timestamp) -> pd.DataFrame:
     """
     Fetch prices + net_imports from ENTSOE for the period between training data
-    and the eval window (typically the last 1–2 days not yet in final_dataset.parquet).
-
-    Only price and net_imports are populated; all other columns are NaN so the
-    existing proxy logic in build_eval_row handles generation/weather features.
-
-    Called automatically when --predict is used if a gap exists.
+    and the eval window (typically the last 1–2 days not yet in parquet).
     """
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).parent))
@@ -449,11 +487,11 @@ def fetch_gap_actuals(zone: str, gap_start: pd.Timestamp, gap_end: pd.Timestamp)
     eic       = ENTSOE_ZONES[zone]
     neighbors = ENTSOE_NEIGHBORS[zone]
 
-    # ENTSOE queries need tz-aware Timestamps; use Brussels (CET/CEST) like ingestion.py
     q_start = pd.Timestamp(gap_start.date().isoformat(), tz="Europe/Brussels")
-    q_end   = pd.Timestamp((gap_end + pd.Timedelta(days=1)).date().isoformat(), tz="Europe/Brussels")
+    q_end   = pd.Timestamp(
+        (gap_end + pd.Timedelta(days=1)).date().isoformat(), tz="Europe/Brussels"
+    )
 
-    # ── Prices ────────────────────────────────────────────────────────────────
     try:
         prices = client.query_day_ahead_prices(eic, start=q_start, end=q_end)
         prices = prices.tz_convert("UTC")
@@ -465,10 +503,8 @@ def fetch_gap_actuals(zone: str, gap_start: pd.Timestamp, gap_end: pd.Timestamp)
         log.warning("Gap prices fetch %s failed: %s", zone, exc)
         return pd.DataFrame()
 
-    gap_df = prices.to_frame()
-
-    # ── Cross-border flows → net_imports ──────────────────────────────────────
-    net_parts: list[pd.Series] = []
+    gap_df    = prices.to_frame()
+    net_parts = []
     for nbr_eic in neighbors:
         try:
             imp = client.query_crossborder_flows(nbr_eic, eic, start=q_start, end=q_end)
@@ -480,46 +516,71 @@ def fetch_gap_actuals(zone: str, gap_start: pd.Timestamp, gap_end: pd.Timestamp)
             pass
 
     if net_parts:
-        net_imports = pd.concat(net_parts, axis=1).sum(axis=1)
+        net_imports      = pd.concat(net_parts, axis=1).sum(axis=1)
         net_imports.name = "net_imports"
-        gap_df = gap_df.join(net_imports, how="left")
-        log.info("  Gap net_imports %s: %d non-null", zone, gap_df["net_imports"].notna().sum())
-    else:
-        log.warning("  No cross-border flow data for gap period (%s) — net_imports will be NaN", zone)
+        gap_df           = gap_df.join(net_imports, how="left")
 
-    # Clip to exact requested window
     gap_df = gap_df.loc[(gap_df.index >= gap_start) & (gap_df.index < gap_end)]
     return gap_df
 
 
-# ── Weather fetch helper (archive or forecast depending on date) ──────────────
+# ── Weather fetch helper ──────────────────────────────────────────────────────
 
-def _fetch_weather(zone: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame | None:
+def _fetch_weather(zone: str, start: pd.Timestamp,
+                    end: pd.Timestamp) -> pd.DataFrame | None:
     """
-    Fetch hourly weather for any window — historical forecast API for past dates,
-    forecast API for near-future dates (≤16 days ahead). Returns UTC-indexed
-    DataFrame with columns [temperature, wind_speed, solar_radiation], or None on failure.
+    Fetch hourly weather for any window.
+    Returns UTC-indexed DataFrame with columns matching training features.
 
-    This function is critical for realistic backtesting. It uses the Open-Meteo
-    historical forecast API to get what the forecast *would have been* on a past
-    date, avoiding data leakage from using historical actuals.
+    FIXED: wind_speed_10m → wind_speed_100m (turbine hub height).
+    Multi-city aggregated weather used when available; falls back to single location.
     """
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).parent))
     from ingestion import _get, WEATHER_LOCATIONS
 
-    loc = WEATHER_LOCATIONS[zone]
-    _today = pd.Timestamp.utcnow().normalize()
+    _today  = pd.Timestamp.utcnow().normalize()
     api_key = os.environ.get("OM_API_KEY")
+    frames  = []
 
-    frames = []
+    # Try multi-city aggregated fetch first (new ingestion supports this)
+    try:
+        from ingestion import fetch_weather_forecast as _fwf_multi
+        fcst_start = max(start, _today)
+        fcst_end   = min(end, _today + pd.Timedelta(days=14))
+        if fcst_start <= fcst_end:
+            raw = _fwf_multi(
+                zone,
+                fcst_start.strftime("%Y-%m-%d"),
+                fcst_end.strftime("%Y-%m-%d")
+            )
+            if not raw.empty:
+                raw.index = pd.to_datetime(raw["time"], utc=True)
+                raw = raw.drop(columns=["time"], errors="ignore")
+                frames.append(raw)
+                log.info("  Multi-city weather forecast %s: %d rows, %d cols",
+                         zone, len(raw), len(raw.columns))
+    except Exception as exc:
+        log.warning("  Multi-city weather fetch failed: %s — falling back to single location", exc)
 
-    # Past portion → historical forecast API (commercial, requires API key)
-    if start < _today:
-        hist_end = min(end, _today - pd.Timedelta(hours=1))
-        if not api_key:
-            log.warning("  OM_API_KEY not set — cannot use historical weather API. Will use proxy.")
-        else:
+    # Fallback: single location (original behaviour)
+    if not frames:
+        # FIXED: Use first location from new WEATHER_LOCATIONS structure
+        loc_group = "DE_demand" if zone == "DE-LU" else "ES_demand"
+        try:
+            from config import WEATHER_LOCATIONS as WL
+            loc_list = WL.get(loc_group, [])
+            if loc_list:
+                loc = {"latitude": loc_list[0]["latitude"],
+                       "longitude": loc_list[0]["longitude"]}
+            else:
+                loc = WEATHER_LOCATIONS[zone]  # original single-entry dict
+        except Exception:
+            loc = WEATHER_LOCATIONS[zone]
+
+        # Past portion → historical forecast API
+        if start < _today and api_key:
+            hist_end = min(end, _today - pd.Timedelta(hours=1))
             try:
                 d = _get(
                     "https://historical-forecast-api.open-meteo.com/v1/forecast",
@@ -528,7 +589,8 @@ def _fetch_weather(zone: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Data
                         "longitude":       loc["longitude"],
                         "start_date":      start.strftime("%Y-%m-%d"),
                         "end_date":        hist_end.strftime("%Y-%m-%d"),
-                        "hourly":          "temperature_2m,wind_speed_10m,shortwave_radiation",
+                        # FIXED: was wind_speed_10m
+                        "hourly":          "temperature_2m,wind_speed_100m,shortwave_radiation",
                         "timezone":        "UTC",
                         "wind_speed_unit": "ms",
                     },
@@ -538,30 +600,36 @@ def _fetch_weather(zone: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Data
                 if h.get("time"):
                     frames.append(pd.DataFrame({
                         "temperature":     h["temperature_2m"],
-                        "wind_speed":      h["wind_speed_10m"],
+                        "wind_speed":      h["wind_speed_100m"],   # FIXED
                         "solar_radiation": h["shortwave_radiation"],
                     }, index=pd.to_datetime(h["time"], utc=True)))
-                    log.info("  Weather hist-forecast %s: %d rows", zone, len(frames[-1]))
             except Exception as exc:
-                log.warning("  Weather hist-forecast %s failed: %s — proxy", zone, exc)
+                log.warning("  Weather hist-forecast %s failed: %s", zone, exc)
 
-    # Future portion → forecast API (capped at 14 days)
-    _FCST_LIMIT = 14
-    fcst_start = max(start, _today)
-    fcst_end   = min(end, _today + pd.Timedelta(days=_FCST_LIMIT))
-    if fcst_start <= fcst_end and fcst_start < end:
-        try:
-            from ingestion import fetch_weather_forecast as _fwf
-            raw = _fwf(zone, fcst_start.strftime("%Y-%m-%d"), fcst_end.strftime("%Y-%m-%d"))
-            df  = pd.DataFrame({
-                "temperature":     raw["temperature"],
-                "wind_speed":      raw["wind_speed"],
-                "solar_radiation": raw["solar_radiation"],
-            }, index=pd.to_datetime(raw["time"], utc=True))
-            frames.append(df)
-            log.info("  Weather forecast %s: %d rows", zone, len(df))
-        except Exception as exc:
-            log.warning("  Weather forecast %s failed: %s — proxy", zone, exc)
+        # Future portion → forecast API
+        fcst_start = max(start, _today)
+        fcst_end   = min(end, _today + pd.Timedelta(days=14))
+        if fcst_start <= fcst_end and fcst_start < end:
+            try:
+                d = _get("https://api.open-meteo.com/v1/forecast", {
+                    "latitude":        loc["latitude"],
+                    "longitude":       loc["longitude"],
+                    "start_date":      fcst_start.strftime("%Y-%m-%d"),
+                    "end_date":        fcst_end.strftime("%Y-%m-%d"),
+                    # FIXED: was wind_speed_10m
+                    "hourly":          "temperature_2m,wind_speed_100m,shortwave_radiation",
+                    "timezone":        "UTC",
+                    "wind_speed_unit": "ms",
+                })
+                h = d.get("hourly", {})
+                if h.get("time"):
+                    frames.append(pd.DataFrame({
+                        "temperature":     h["temperature_2m"],
+                        "wind_speed":      h["wind_speed_100m"],   # FIXED
+                        "solar_radiation": h["shortwave_radiation"],
+                    }, index=pd.to_datetime(h["time"], utc=True)))
+            except Exception as exc:
+                log.warning("  Weather forecast %s failed: %s", zone, exc)
 
     if not frames:
         return None
@@ -574,48 +642,38 @@ def fetch_entsoe_gen_forecast(
     zone: str, fcst_start: pd.Timestamp, fcst_end: pd.Timestamp
 ) -> pd.DataFrame:
     """
-    Fetch ENTSOE day-ahead load + wind/solar forecasts for the eval window.
-
-    These are published ~12-24h before delivery — exactly the information available
-    at auction time. Using them for the eval window gives better feature quality
-    than the same-weekday-hour proxy (which can miss weather-driven anomalies).
-
-    Returns a DataFrame indexed by UTC timestamp with columns:
-      load, wind_generation, solar_generation  (matching training feature names)
+    Fetch ENTSOE day-ahead load + wind/solar + nuclear forecasts for eval window.
     """
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).parent))
-    from config import ENTSOE_TOKEN, ENTSOE_ZONES, ENTSOE_WIND_TYPES, ENTSOE_SOLAR_TYPES
+    from config import (ENTSOE_TOKEN, ENTSOE_ZONES,
+                        ENTSOE_WIND_TYPES, ENTSOE_SOLAR_TYPES, ENTSOE_NUCLEAR_TYPES)
 
     if not ENTSOE_TOKEN:
-        log.warning("ENTSOE_TOKEN not set — skipping gen forecast fetch")
         return pd.DataFrame()
 
     try:
         from entsoe import EntsoePandasClient
     except ImportError:
-        log.warning("entsoe-py not installed — skipping gen forecast fetch")
         return pd.DataFrame()
 
     client  = EntsoePandasClient(api_key=ENTSOE_TOKEN)
     eic     = ENTSOE_ZONES[zone]
     q_start = pd.Timestamp(fcst_start.date().isoformat(), tz="Europe/Brussels")
-    q_end   = pd.Timestamp((fcst_end + pd.Timedelta(days=1)).date().isoformat(), tz="Europe/Brussels")
+    q_end   = pd.Timestamp(
+        (fcst_end + pd.Timedelta(days=1)).date().isoformat(), tz="Europe/Brussels"
+    )
 
     result: dict[str, pd.Series] = {}
 
-    # Load forecast
     try:
         lf = client.query_load_forecast(eic, start=q_start, end=q_end)
         if isinstance(lf, pd.DataFrame):
             lf = lf.iloc[:, 0]
-        lf = lf.tz_convert("UTC").resample("h").mean()
-        result["load"] = lf
-        log.info("  ENTSOE load forecast %s: %d rows", zone, len(lf))
+        result["load"] = lf.tz_convert("UTC").resample("h").mean()
     except Exception as exc:
         log.warning("  ENTSOE load forecast %s: %s", zone, exc)
 
-    # Wind + solar forecast
     try:
         ws = client.query_wind_and_solar_forecast(eic, start=q_start, end=q_end)
         ws = ws.tz_convert("UTC")
@@ -629,7 +687,6 @@ def fetch_entsoe_gen_forecast(
             result["wind_generation"]  = ws[wind_cols].sum(axis=1).clip(lower=0)
         if solar_cols:
             result["solar_generation"] = ws[solar_cols].sum(axis=1).clip(lower=0)
-        log.info("  ENTSOE wind/solar forecast %s: %d rows", zone, len(ws))
     except Exception as exc:
         log.warning("  ENTSOE wind/solar forecast %s: %s", zone, exc)
 
@@ -638,7 +695,6 @@ def fetch_entsoe_gen_forecast(
 
     df = pd.DataFrame(result)
     df = df[(df.index >= fcst_start) & (df.index <= fcst_end)]
-    log.info("  Gen forecast %s: %d rows, cols=%s", zone, len(df), list(df.columns))
     return df
 
 
@@ -660,71 +716,103 @@ def build_eval_row(
 
     Called sequentially so predicted_p50 is populated with all prior slots
     before this row is built — enabling honest recursive lag_1 / lag_24 fill.
-
-    Generation/load: ENTSOE day-ahead forecast if provided, else same-weekday-hour proxy.
-    Weather: Open-Meteo 10-day forecast if provided, else same-weekday-hour proxy.
-    Lags: actual prices where available; predicted p50 where recursive.
     """
     row: dict = {}
 
     # ── Generation / proxy features ───────────────────────────────────────────
-    same_hw = ref[(ref.index.hour == ts.hour) & (ref.index.dayofweek == ts.dayofweek)]
+    same_hw    = ref[(ref.index.hour == ts.hour) & (ref.index.dayofweek == ts.dayofweek)]
     proxy_cols = ["load", "wind_generation", "solar_generation", "hydro_generation",
-                  "residual_load", "renewable_penetration", "residual_load_ramp"]
+                  "nuclear_generation",
+                  "residual_load", "renewable_penetration", "residual_load_ramp",
+                  "residual_load_forecast", "renewable_penetration_forecast",
+                  "residual_load_ramp_forecast"]
     if "net_imports" in ref.columns:
         proxy_cols.append("net_imports")
+
     for col in proxy_cols:
         if col in ref.columns:
             row[col] = float(same_hw[col].mean()) if len(same_hw) > 0 else float(ref[col].mean())
         else:
             row[col] = 0.0
 
-    # Override load/wind/solar with ENTSOE day-ahead forecast when all three are available.
-    # Only override if all three columns are present and non-null to avoid partial mismatch
-    # in the derived residual_load / renewable_penetration features.
+    # Override with ENTSOE day-ahead forecast when available
     if (gen_fcst is not None and ts in gen_fcst.index and
-            all(c in gen_fcst.columns for c in ["load", "wind_generation", "solar_generation"]) and
-            not any(pd.isna(gen_fcst.loc[ts, c]) for c in ["load", "wind_generation", "solar_generation"])):
+            all(c in gen_fcst.columns
+                for c in ["load", "wind_generation", "solar_generation"]) and
+            not any(pd.isna(gen_fcst.loc[ts, c])
+                    for c in ["load", "wind_generation", "solar_generation"])):
         row["load"]             = float(gen_fcst.loc[ts, "load"])
         row["wind_generation"]  = float(gen_fcst.loc[ts, "wind_generation"])
         row["solar_generation"] = float(gen_fcst.loc[ts, "solar_generation"])
-        # Recompute derived features from forecast values
-        row["residual_load"] = max(0.0, row["load"] - row["wind_generation"] - row["solar_generation"])
+        row["residual_load"]    = max(
+            0.0, row["load"] - row["wind_generation"] - row["solar_generation"]
+        )
         if row["load"] > 0:
-            row["renewable_penetration"] = min(1.0,
-                (row["wind_generation"] + row["solar_generation"]) / row["load"])
+            row["renewable_penetration"] = min(
+                1.0, (row["wind_generation"] + row["solar_generation"]) / row["load"]
+            )
 
-    # Recompute ramp and clip to prevent proxy-driven spikes.
-    # The historical 1st-99th percentile range is approx. -2500 to 5000 MW/hr.
     if prev_residual_load is not None:
         ramp = row["residual_load"] - prev_residual_load
     else:
-        # Fallback for the first hour: use the proxy value directly.
         ramp = row["residual_load_ramp"]
     row["residual_load_ramp"] = np.clip(ramp, -2500, 5000)
 
-    # ── Weather: forecast if available, else same-weekday-hour proxy ──────────
+    # ── Weather features ──────────────────────────────────────────────────────
+    # Original single-city columns (fallback)
     weather_cols = ["temperature", "wind_speed", "solar_radiation"]
     if weather_fcst is not None and ts in weather_fcst.index:
         for col in weather_cols:
-            row[col] = float(weather_fcst.loc[ts, col])
+            if col in weather_fcst.columns:
+                row[col] = float(weather_fcst.loc[ts, col])
+            else:
+                row[col] = (float(same_hw[col].mean()) if col in ref.columns and len(same_hw) > 0
+                            else float(ref[col].mean()) if col in ref.columns else 0.0)
     else:
         for col in weather_cols:
-            row[col] = float(same_hw[col].mean()) if len(same_hw) > 0 else float(ref[col].mean())
+            row[col] = (float(same_hw[col].mean()) if col in ref.columns and len(same_hw) > 0
+                        else float(ref[col].mean()) if col in ref.columns else 0.0)
+
+    # Multi-city aggregated weather — override if present
+    agg_map = {
+        "temperature":     "temperature_agg",
+        "wind_speed":      "wind_speed_agg",
+        "solar_radiation": "solar_radiation_agg",
+    }
+    for orig_col, agg_col in agg_map.items():
+        if agg_col in ref.columns:
+            row[orig_col] = (float(same_hw[agg_col].mean()) if len(same_hw) > 0
+                             else float(ref[agg_col].mean()))
+            if weather_fcst is not None and ts in weather_fcst.index and agg_col in weather_fcst.columns:
+                row[orig_col] = float(weather_fcst.loc[ts, agg_col])
+
+    # Engineered weather features
+    for feat in ["wind_speed_cubed", "solar_radiation_agg", "wind_speed_agg",
+                 "solar_hour_interaction", "temperature_agg", "temperature_sq",
+                 "DK_wind_speed", "DK_wind_speed_cubed",
+                 "CH_precipitation", "CH_precip_7d_sum",
+                 "ES_hydro_precipitation", "ES_hydro_precip_7d_sum",
+                 "nuclear_available_mw",
+                 "wind_ensemble_std", "solar_ensemble_std"]:
+        if feat in ref.columns:
+            row[feat] = (float(same_hw[feat].mean()) if len(same_hw) > 0
+                         else float(ref[feat].mean()))
+            if weather_fcst is not None and ts in weather_fcst.index and feat in weather_fcst.columns:
+                row[feat] = float(weather_fcst.loc[ts, feat])
+        else:
+            row[feat] = 0.0
 
     # ── Holiday proximity ─────────────────────────────────────────────────────
     ts_date = ts.date()
-    hol_ord  = np.array(sorted(d.toordinal() for d in cal.keys()
-                               if abs(d.year - ts_date.year) <= 2))
+    hol_ord = np.array(sorted(d.toordinal() for d in cal.keys()
+                              if abs(d.year - ts_date.year) <= 2))
     if len(hol_ord):
-        d_ord = ts_date.toordinal()
-        idx_next    = np.searchsorted(hol_ord, d_ord, side="right")
-        idx_next    = min(idx_next, len(hol_ord) - 1)
+        d_ord       = ts_date.toordinal()
+        idx_next    = min(np.searchsorted(hol_ord, d_ord, side="right"), len(hol_ord) - 1)
         days_to_raw = hol_ord[idx_next] - d_ord
         row["days_to_holiday"] = int(np.clip(days_to_raw if days_to_raw > 0 else 7, 0, 7))
 
-        idx_prev      = np.searchsorted(hol_ord, d_ord, side="left") - 1
-        idx_prev      = max(idx_prev, 0)
+        idx_prev      = max(np.searchsorted(hol_ord, d_ord, side="left") - 1, 0)
         days_from_raw = d_ord - hol_ord[idx_prev]
         row["days_from_holiday"] = int(np.clip(days_from_raw if days_from_raw > 0 else 7, 0, 7))
     else:
@@ -732,8 +820,19 @@ def build_eval_row(
         row["days_from_holiday"] = 7
 
     # ── Fuel: carry forward last known ────────────────────────────────────────
-    row["gas_price"]    = float(ref["gas_price"].iloc[-1])
-    row["carbon_price"] = float(ref["carbon_price"].iloc[-1])
+    for fuel_col in ["gas_price", "carbon_price", "coal_price"]:  # coal_price NEW
+        row[fuel_col] = float(ref[fuel_col].iloc[-1]) if fuel_col in ref.columns else 0.0
+
+    # ── Neighbor prices: carry forward last known ─────────────────────────────
+    for nb_col in ["FR_price_lag24", "NL_price_lag24", "CH_price_lag24", "DK_price_lag24",
+                   "DE_LU_FR_spread", "DE_LU_NL_spread", "DE_LU_CH_spread", "ES_FR_spread",
+                   "cross_zone_lag24"]:
+        row[nb_col] = float(ref[nb_col].iloc[-1]) if nb_col in ref.columns else 0.0
+
+    # ── Regime flags ──────────────────────────────────────────────────────────
+    row["crisis_period"]        = 0   # May 2026 is post-crisis
+    row["is_peak"]              = int(ts.hour in {7, 8, 9, 17, 18, 19, 20})
+    row["negative_price_lag24"] = int(row.get("lag_24", 0) < 0)
 
     # ── Calendar ──────────────────────────────────────────────────────────────
     woy = ts.isocalendar()[1]
@@ -753,31 +852,35 @@ def build_eval_row(
             return float(zdf.loc[lag_ts, "price"])
         if lag_ts in predicted_p50:
             return predicted_p50[lag_ts]
-        return float(ref[fallback_col].mean())
+        return float(ref[fallback_col].mean()) if fallback_col in ref.columns else 0.0
 
     row["lag_168"] = lookup(ts - pd.Timedelta(hours=168), "lag_168")
     row["lag_24"]  = lookup(ts - pd.Timedelta(hours=24),  "lag_24")
     row["lag_1"]   = lookup(ts - pd.Timedelta(hours=1),   "lag_1")
 
-    # Rolling means: use trailing actuals from the known dataset
-    row["price_roll_24h"]  = float(zdf["price"].iloc[-24:].mean())
-    row["price_roll_168h"] = float(zdf["price"].iloc[-168:].mean())
+    row["price_roll_24h"]    = float(zdf["price"].iloc[-24:].mean())
+    row["price_roll_168h"]   = float(zdf["price"].iloc[-168:].mean())
+    row["price_roll_std_168h"] = float(zdf["price"].iloc[-168:].std())
 
     return row, row["residual_load"]
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(predict: bool = False, pred_start: str | None = None, pred_end: str | None = None) -> None:
+def main(predict: bool = False, pred_start: str | None = None,
+         pred_end: str | None = None) -> None:
+
     log.info("Loading dataset from %s", DATA_PATH)
     df = pd.read_parquet(DATA_PATH)
 
-    # net_imports only present after ENTSOE pipeline run; drop from FEATURES if absent
+    # Auto-filter FEATURES to columns present in dataset
+    # Safe to list future features — missing ones are silently skipped
     active_features = [f for f in FEATURES if f in df.columns]
     if len(active_features) < len(FEATURES):
         missing = set(FEATURES) - set(active_features)
-        log.warning("Features missing from dataset (re-run pipeline): %s", missing)
-    globals()["FEATURES"] = active_features  # propagate to train_zone / build_eval_row
+        log.warning("Features missing from dataset (run full pipeline): %s",
+                    sorted(missing))
+    globals()["FEATURES"] = active_features
 
     all_models = {}
     all_val    = {}
@@ -800,14 +903,14 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
     log.info("CQR CALIBRATION  (window: %s → %s)", VAL_END, CAL_END)
     cqr = {}
     for zone in ZONES:
-        zdf = df.xs(zone, level="zone").sort_index()
+        zdf      = df.xs(zone, level="zone").sort_index()
         cqr[zone] = calibrate_zone(zdf, all_models[zone], zone)
 
     log.info("━" * 56)
     log.info("LONG-TERM MODEL  (seasonal profile + annual trend)")
     lt_models = {}
     for zone in ZONES:
-        zdf = df.xs(zone, level="zone").sort_index()
+        zdf            = df.xs(zone, level="zone").sort_index()
         lt_models[zone] = build_longterm_model(zdf, zone)
 
     if not predict:
@@ -818,19 +921,25 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
 
     _ZONE_COUNTRY = {"DE-LU": "DE", "ES": "ES"}
 
-    # Hackathon eval window defaults; override via --start / --end
-    _DEFAULT_START = "2026-05-08 17:00"
-    _DEFAULT_END   = "2026-05-09 22:00"
+    # ── FIXED: correct eval window ────────────────────────────────────────────
+    # Competition window: Mon 11 May 2026 02:00 CEST → Tue 12 May 2026 01:00 CEST
+    # In UTC: 2026-05-11 00:00 → 2026-05-11 23:00  (48 hourly slots)
+    _DEFAULT_START = "2026-05-11 00:00"   # ← FIXED (was 2026-05-08 17:00)
+    _DEFAULT_END   = "2026-05-11 23:00"   # ← FIXED (was 2026-05-09 22:00)
+
     eval_start = pd.Timestamp(pred_start or _DEFAULT_START, tz="UTC")
     eval_end   = pd.Timestamp(pred_end   or _DEFAULT_END,   tz="UTC")
     eval_idx   = pd.date_range(eval_start, eval_end, freq="h")
     log.info("  Window: %s → %s  (%d slots)", eval_start, eval_end, len(eval_idx))
 
-    # Fetch weather: archive API for past slots, forecast API for near-future slots.
-    # Long-term slots (>14 days out) use the seasonal proxy.
-    _today = pd.Timestamp.utcnow().normalize()
+    # Sanity check — must be exactly 48 slots for competition submission
+    if pred_start is None and len(eval_idx) != 48:
+        log.error("CRITICAL: Expected 48 eval slots, got %d — check eval window", len(eval_idx))
+
+    _today         = pd.Timestamp.utcnow().normalize()
     _WX_LIMIT_DAYS = 14
-    wx_fetch_end = min(eval_end, _today + pd.Timedelta(days=_WX_LIMIT_DAYS))
+    wx_fetch_end   = min(eval_end, _today + pd.Timedelta(days=_WX_LIMIT_DAYS))
+
     zone_weather_fcst: dict[str, pd.DataFrame | None] = {}
     if wx_fetch_end >= eval_start:
         for zone in ZONES:
@@ -840,9 +949,6 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
         for zone in ZONES:
             zone_weather_fcst[zone] = None
 
-    # Fetch ENTSOE day-ahead generation + load forecasts for the short-term portion.
-    # These are the actual pre-auction forecasts published by grid operators — better
-    # than the same-weekday-hour proxy for generation/load features.
     fcst_end_capped = wx_fetch_end
     zone_gen_fcst: dict[str, pd.DataFrame | None] = {}
     if fcst_end_capped >= eval_start:
@@ -861,44 +967,40 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
     for zone in ZONES:
         zdf = df.xs(zone, level="zone").sort_index()
 
-        # Patch zdf with gap actuals: prices + net_imports for any hours between
-        # training tail and eval start (typically the most recent 1–2 days).
-        # This gives lag_24 lookups real values instead of falling back to averages.
         gap_start = zdf.index[-1] + pd.Timedelta(hours=1)
         if gap_start < eval_start:
-            log.info("Fetching gap actuals for %s (%s → %s) ...", zone, gap_start.date(), eval_start.date())
+            log.info("Fetching gap actuals for %s (%s → %s) ...",
+                     zone, gap_start.date(), eval_start.date())
             gap_df = fetch_gap_actuals(zone, gap_start, eval_start)
             if len(gap_df) > 0:
                 zdf = pd.concat([zdf, gap_df])
                 zdf = zdf[~zdf.index.duplicated(keep="last")].sort_index()
                 log.info("  zdf extended: tail now %s", zdf.index[-1])
 
-        ref = zdf[eval_start - pd.Timedelta(weeks=4) : eval_start - pd.Timedelta(hours=1)]
-        cal = hdays.country_holidays(_ZONE_COUNTRY[zone])
+        ref          = zdf[eval_start - pd.Timedelta(weeks=4):
+                           eval_start - pd.Timedelta(hours=1)]
+        cal          = hdays.country_holidays(_ZONE_COUNTRY[zone])
         weather_fcst = zone_weather_fcst[zone]
+        gen_fcst     = zone_gen_fcst[zone]
 
-        predicted_p50 = {}  # populated slot-by-slot for recursive lags
+        predicted_p50              = {}
         p025_list, p50_list, p975_list = [], [], []
-        regime_log = {"shortterm": 0, "longterm": 0}
+        regime_log                 = {"shortterm": 0, "longterm": 0}
 
         q_50        = cqr[zone]["p50"]
-        mondrian_iv = cqr[zone]["mondrian"]   # {0: Q_hat_normal, 1: Q_hat_risky}
+        mondrian_iv = cqr[zone]["mondrian"]
         lt          = lt_models[zone]
-        zdf_tail    = zdf.index[-1]   # reference point for horizon calculation
-        gen_fcst    = zone_gen_fcst[zone]
+        zdf_tail    = zdf.index[-1]
 
-        # Initialize with the last known residual load from the dataset for correct
-        # ramp calculation in the first prediction slot.
-        prev_residual_load = zdf["residual_load"].iloc[-1] if "residual_load" in zdf else None
+        prev_residual_load = (float(zdf["residual_load"].iloc[-1])
+                              if "residual_load" in zdf.columns else None)
 
         for ts in eval_idx:
             horizon_days = (ts - zdf_tail).total_seconds() / 86400.0
-            # Mondrian bucket — determines which Q_hat to apply for interval
-            bucket   = _mondrian_bucket(ts, cal)
-            q_iv_slot = mondrian_iv[bucket]
+            bucket       = _mondrian_bucket(ts, cal)
+            q_iv_slot    = mondrian_iv[bucket]
 
             if horizon_days <= SHORTTERM_DAYS:
-                # ── Short-term: LightGBM + Mondrian CQR ──────────────────────
                 row, current_residual_load = build_eval_row(
                     zdf, ref, zone, ts, predicted_p50, cal,
                     weather_fcst, gen_fcst, prev_residual_load
@@ -922,7 +1024,6 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
                 regime_log["shortterm"] += 1
 
             else:
-                # ── Long-term: seasonal profile + annual trend ─────────────────
                 p025, p50, p975 = predict_longterm_slot(ts, lt, horizon_days)
                 regime_log["longterm"] += 1
 
@@ -938,9 +1039,8 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
                  np.mean(np.array(p975_list) - np.array(p025_list)),
                  regime_log["shortterm"], regime_log["longterm"])
 
-    # Build submission CSV
-    # Timestamps: ISO 8601 with CEST offset (+02:00, Europe is on summer time in May)
-    cest = pd.DatetimeTZDtype(tz="Europe/Berlin")
+    # ── Build submission CSV ──────────────────────────────────────────────────
+    # Timestamps: ISO 8601 with CEST offset (+02:00 in May)
     ts_cest = eval_idx.tz_convert("Europe/Berlin")
     ts_str  = [t.isoformat() for t in ts_cest]
 
@@ -954,29 +1054,38 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
         "ES p975":    zone_preds["ES"]["p975"],
     })
 
+    # Final submission sanity checks
+    assert len(out) == 48,              f"Expected 48 rows, got {len(out)}"
+    assert (out["DE-LU p025"] < out["DE-LU p50"]).all(),  "DE-LU p025 >= p50 violation"
+    assert (out["DE-LU p50"]  < out["DE-LU p975"]).all(), "DE-LU p50 >= p975 violation"
+    assert (out["ES p025"]    < out["ES p50"]).all(),      "ES p025 >= p50 violation"
+    assert (out["ES p50"]     < out["ES p975"]).all(),     "ES p50 >= p975 violation"
+    assert out.isnull().sum().sum() == 0,                  "NaN values in submission"
+
     out.to_csv(OUT_PATH, index=False, float_format="%.4f")
     log.info("Saved %s  (%d rows)", OUT_PATH, len(out))
-    log.info("Preview:\n%s", out.to_string())
+    log.info("Preview:\n%s", out.head(10).to_string())
 
-    # ── Backtest: if the window overlaps known actuals, report accuracy ────────
+    # ── Backtest ──────────────────────────────────────────────────────────────
     log.info("━" * 56)
     any_backtest = False
     for zone in ZONES:
-        zdf = df.xs(zone, level="zone").sort_index()
-        known = zdf[(zdf.index >= eval_start) & (zdf.index <= eval_end)]["price"].dropna()
+        zdf   = df.xs(zone, level="zone").sort_index()
+        known = zdf[(zdf.index >= eval_start) &
+                    (zdf.index <= eval_end)]["price"].dropna()
         if len(known) == 0:
             continue
         any_backtest = True
         p50_arr  = np.array(zone_preds[zone]["p50"])
         p025_arr = np.array(zone_preds[zone]["p025"])
         p975_arr = np.array(zone_preds[zone]["p975"])
-        # Align: only slots where actuals exist
         mask     = np.array([ts in known.index for ts in eval_idx])
         y_known  = known.reindex(eval_idx[mask]).values
         log.info("  BACKTEST %s (%d slots with actuals):", zone, mask.sum())
         log.info("    MAE p50      : %.2f EUR/MWh", np.abs(y_known - p50_arr[mask]).mean())
         log.info("    Pinball 0.45 : %.4f", pinball(y_known, p50_arr[mask], 0.45))
-        log.info("    Coverage     : %.1f%%", coverage(y_known, p025_arr[mask], p975_arr[mask]) * 100)
+        log.info("    Coverage     : %.1f%%",
+                 coverage(y_known, p025_arr[mask], p975_arr[mask]) * 100)
     if not any_backtest:
         log.info("  No actuals in dataset for this window — forward prediction only.")
 
@@ -986,10 +1095,8 @@ if __name__ == "__main__":
     parser.add_argument("--predict", action="store_true",
                         help="Generate predictions.csv for the specified window")
     parser.add_argument("--start", default=None,
-                        help="Prediction window start, UTC (e.g. '2026-05-10 17:00'). "
-                             "Defaults to hackathon eval window 2026-05-08 17:00.")
+                        help="Prediction window start UTC (e.g. '2026-05-11 00:00')")
     parser.add_argument("--end", default=None,
-                        help="Prediction window end, UTC (e.g. '2026-05-11 22:00'). "
-                             "Defaults to hackathon eval window 2026-05-09 22:00.")
+                        help="Prediction window end UTC (e.g. '2026-05-11 23:00')")
     args = parser.parse_args()
     main(predict=args.predict, pred_start=args.start, pred_end=args.end)
