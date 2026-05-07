@@ -52,6 +52,16 @@ def align_zone(zone: str) -> pd.DataFrame:
     else:
         log.info("Zone %s: no crossborder parquet — net_imports not included", zone)
 
+    # Day-ahead forecasts — optional; present after running full pipeline with ENTSOE forecasts.
+    # Fallback: absence is silent; model uses actuals via active_features filter.
+    fcst_path = DATA_CLEAN / f"forecasts_{zone}.parquet"
+    if fcst_path.exists():
+        fcst = pd.read_parquet(fcst_path)
+        if not fcst.empty:
+            df = df.join(fcst.reindex(common), how="left")
+            fcst_cols = [c for c in fcst.columns if c]
+            log.info("Zone %s: day-ahead forecasts joined (%d cols)", zone, len(fcst_cols))
+
     # Drop rows missing any critical column
     before = len(df)
     df = df.dropna(subset=CRITICAL_COLS)

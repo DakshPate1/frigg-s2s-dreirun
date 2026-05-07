@@ -63,10 +63,15 @@ def _resample_hourly(obj: pd.Series | pd.DataFrame) -> pd.Series | pd.DataFrame:
     return obj
 
 
-def _get(url: str, params: dict, retries: int = 3, pause: float = 1.0) -> dict:
+def _get(url: str, params: dict, retries: int = 3, pause: float = 1.0, api_key: str | None = None) -> dict:
+    """Helper for robust GET requests with retries and optional API key."""
+    query_params = params.copy()
+    if api_key:
+        query_params["apikey"] = api_key
+
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, timeout=60)
+            r = requests.get(url, params=query_params, timeout=60)
             r.raise_for_status()
             return r.json()
         except Exception as exc:
@@ -239,6 +244,75 @@ def fetch_entsoe_crossborder(zone: str, start: str = TRAIN_START, end: str = TRA
     return df
 
 
+# ── ENTSOE: Day-ahead generation + load forecasts ─────────────────────────────
+
+def fetch_entsoe_forecasts(zone: str, start: str = TRAIN_START, end: str = TRAIN_END) -> pd.DataFrame:
+    """
+    Fetch day-ahead load + wind/solar generation forecasts from ENTSOE.
+
+    These are published ~12-24h before delivery — the same information available
+    to market participants before the auction. Training on forecasts instead of
+    actuals avoids the distribution mismatch that occurs when we predict future
+    slots (where only forecasts exist) using a model trained on actuals.
+
+    Saves: data/raw/entsoe/forecasts_{zone}.csv
+    Columns: timestamp, load_forecast, wind_generation_forecast, solar_generation_forecast
+    """
+    client = _entsoe_client()
+    eic    = ENTSOE_ZONES[zone]
+    frames = []
+
+    for s, e in _chunk_dates(start, end, 180):
+        log.info("ENTSOE forecasts %s  %s → %s", zone, s, e)
+        ts_s = _ts(s)
+        ts_e = _ts(e) + pd.Timedelta(days=1)  # +1 day: ENTSOE end is exclusive at midnight
+
+        chunk_data: dict[str, pd.Series] = {}
+
+        # Load forecast (ENTSO-E Week Ahead Load Forecast / Day Ahead)
+        try:
+            lf = client.query_load_forecast(eic, start=ts_s, end=ts_e)
+            if isinstance(lf, pd.DataFrame):
+                lf = lf.iloc[:, 0]
+            lf = _resample_hourly(lf).tz_convert("UTC")
+            chunk_data["load_forecast"] = lf
+        except Exception as exc:
+            log.warning("  Load forecast %s %s: %s", zone, s, exc)
+
+        # Wind + solar forecast (Day-Ahead generation forecast)
+        try:
+            ws = client.query_wind_and_solar_forecast(eic, start=ts_s, end=ts_e)
+            ws = _resample_hourly(ws).tz_convert("UTC")
+            if isinstance(ws.columns, pd.MultiIndex):
+                ws.columns = ws.columns.get_level_values(0)
+            wind_cols  = [c for c in ws.columns if any(t in str(c) for t in ENTSOE_WIND_TYPES)]
+            solar_cols = [c for c in ws.columns if any(t in str(c) for t in ENTSOE_SOLAR_TYPES)]
+            if wind_cols:
+                chunk_data["wind_generation_forecast"] = ws[wind_cols].sum(axis=1).clip(lower=0)
+            if solar_cols:
+                chunk_data["solar_generation_forecast"] = ws[solar_cols].sum(axis=1).clip(lower=0)
+        except Exception as exc:
+            log.warning("  Wind/solar forecast %s %s: %s", zone, s, exc)
+
+        if chunk_data:
+            chunk_df = pd.DataFrame(chunk_data)
+            chunk_df = chunk_df.reset_index()
+            chunk_df.rename(columns={chunk_df.columns[0]: "timestamp"}, inplace=True)
+            chunk_df["timestamp"] = pd.to_datetime(chunk_df["timestamp"]).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            frames.append(chunk_df)
+
+        time.sleep(1.5)
+
+    if not frames:
+        log.warning("No ENTSOE forecast data for %s — skipping", zone)
+        return pd.DataFrame()
+
+    out = pd.concat(frames, ignore_index=True).drop_duplicates("timestamp")
+    out.to_csv(DATA_RAW / "entsoe" / f"forecasts_{zone}.csv", index=False)
+    log.info("Saved entsoe/forecasts_%s.csv — %d rows", zone, len(out))
+    return out
+
+
 # ── Source 3: Open-Meteo weather (unchanged) ──────────────────────────────────
 
 def fetch_weather(zone: str, start: str = TRAIN_START, end: str = TRAIN_END) -> pd.DataFrame:
@@ -371,6 +445,7 @@ def ingest_all(start: str = TRAIN_START, end: str = TRAIN_END) -> None:
         fetch_entsoe_prices(zone, start, end)
         fetch_entsoe_generation(zone, start, end)
         fetch_entsoe_crossborder(zone, start, end)
+        fetch_entsoe_forecasts(zone, start, end)
         fetch_weather(zone, start, end)
 
     fetch_fuel_prices(start, end)

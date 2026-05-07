@@ -31,17 +31,20 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 | DE-LU | 8.53 EUR/MWh | 4.12 | 88.0% | 44.97 EUR/MWh | 33.10 |
 | ES | 6.95 EUR/MWh | 3.50 | 82.3% | 29.33 EUR/MWh | 28.97 |
 
-**CQR calibration results (Jan–May 2026 calibration set):**
+**CQR + Mondrian calibration results (Jan–May 2026 calibration set, n≈2998/zone):**
 
-| Zone | Coverage (raw → CQR) | Pinball 0.45 (raw → CQR) | Band width | CQR interval shift | p50 shift |
-|------|---------------------:|-------------------------:|-----------:|-------------------:|----------:|
-| DE-LU | 88% → 95% | 4.12 → ~4.1 | ~59 EUR/MWh | ±8.11 EUR/MWh | +0.72 |
-| ES | 74.8% → 95% | 3.64 → 3.43 | ~40 EUR/MWh | ±5.21 EUR/MWh | −2.08 |
+| Zone | Coverage (raw → CQR) | Global Q_hat | Bucket 0 (weekday) Q_hat | Bucket 1 (weekend/holiday) Q_hat | p50 shift |
+|------|---------------------:|-------------:|-------------------------:|---------------------------------:|----------:|
+| DE-LU | 90.4% → 95% | 3.71 EUR/MWh | 4.15 EUR/MWh | 2.75 EUR/MWh | +1.24 |
+| ES | 77.9% → 95% | 3.46 EUR/MWh | 4.03 EUR/MWh | 3.04 EUR/MWh | −1.88 |
 
-**Eval window predictions (predictions.csv) — CQR-calibrated candidate**
+*Weekday Q_hat > weekend Q_hat because Jan–May 2026 weekday slots were harder to calibrate (unusual demand patterns). Mondrian applies tighter bands on weekend/holiday slots where the model was already well-calibrated.*
+
+**Eval window predictions (alpine-arbitrage_predictions.csv) — Mondrian CQR-calibrated**
 - 30 slots, May 8–9 2026 in CEST.
-- DE-LU: mean p50 ~€81, strong solar dip midday (p50 → −€8), evening recovery to €101.
-- ES: mean p50 ~€63, midday near zero, evening €100.
+- DE-LU: mean p50 ~€53, solar dip May 9 (p50 → −€51 at 14:00), evening recovery to €80.
+- ES: mean p50 ~€57, midday trough (~€0), evening €78.
+- Bands: tighter on May 9 Saturday (bucket 1), wider on May 8 Friday evening (bucket 0).
 
 **Playground notebook (`notebooks/playground.ipynb`) — ready**
 - 36-cell notebook covering every pipeline layer: data health → EDA → features → training → validation metrics (with explanations) → CQR before/after → feature importance → error analysis → eval window preview.
@@ -64,6 +67,8 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 - [x] ~~Conformalized Quantile Regression (CQR)~~ — **done**. Coverage corrected to 95% on both zones. Calibration set Jan–May 2026 (n≈2992/zone). See `calibrate_zone()` in `src/model.py`.
 - [x] ~~Open-Meteo weather forecast for eval window~~ — **done**. `fetch_weather_forecast()` called automatically by `model.py --predict`; replaces seasonal proxy for temperature/wind/solar_radiation on all eval slots.
 - [x] ~~ENTSOE actual cross-border flows for gap period~~ — **done**. `fetch_gap_actuals()` in `model.py` fetches prices + net_imports for the gap between training tail and eval start; lag_24 lookups use real values.
+- [x] ~~Mondrian conformal bands~~ — **done**. Per-regime CQR calibration: bucket 0 (normal weekday) vs bucket 1 (weekend/holiday/bridge day). Each bucket gets its own Q_hat, tightening intervals where the model is already well-calibrated. Results: DE-LU bucket 0 Q_hat=4.15 / bucket 1 Q_hat=2.75; ES bucket 0 Q_hat=4.03 / bucket 1 Q_hat=3.04.
+- [x] ~~Day-ahead generation forecasts for eval window~~ — **done**. `fetch_entsoe_gen_forecast()` in `model.py` fetches ENTSOE load+wind+solar forecasts for the eval slots (what operators publish before the auction). Falls back to proxy if not yet published. Pipeline infrastructure also added (full historical forecast training requires a pipeline rerun).
 
 **Recent feature improvements:**
 - [x] `residual_load_ramp` — hour-over-hour grid ramp rate; triggers gas-peaker spike predictions
@@ -71,9 +76,8 @@ End-to-end pipeline for forecasting Day-Ahead Auction (DAA) electricity prices f
 - [x] Long-term model: recency-weighted median profile + post-crisis (2023+) trend anchor
 
 **Worth exploring if time allows:**
-- [ ] Mondrian conformal bands — holiday-aware calibration to tighten intervals on normal hours without widening tail-event hours. Closes the remaining coverage gap from seasonal distribution shift.
-- [ ] Day-ahead load + wind/solar forecasts from ENTSOE as features (ENTSOE provides these; thesis recommends using forecasts not actuals to avoid minor leakage). Available via `client.query_load_forecast()` and `client.query_wind_and_solar_forecast()`.
 - [ ] Longer training tail: ENTSOE data goes back to 2015; adding 2015–2020 may improve rare-event coverage (energy crisis periods, COVID demand collapse).
+- [ ] ENTSOE historical forecast pipeline rerun: `fetch_entsoe_forecasts()` is implemented in `ingestion.py`; running `python pipeline.py` will fetch load/wind/solar forecast columns for training. Then add `_forecast` variants to FEATURES in `model.py` to train on pre-auction information instead of actuals.
 - [ ] Gas price: TTF front-month futures (TTF=F) can be a lagged signal. Consider switching to day-ahead TTF spot if a reliable free source exists.
 
 ---

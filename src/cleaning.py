@@ -145,6 +145,39 @@ def clean_entsoe_crossborder(zone: str) -> pd.DataFrame:
     return _save(df, f"crossborder_{zone}.parquet")
 
 
+# ── ENTSOE day-ahead forecasts ────────────────────────────────────────────────
+
+def clean_entsoe_forecasts(zone: str) -> pd.DataFrame:
+    """
+    Clean ENTSOE day-ahead load + wind/solar generation forecasts.
+
+    Returns empty DataFrame if the raw CSV doesn't exist (forecasts are optional;
+    the model falls back to actuals if this file is absent).
+    """
+    path = DATA_RAW / "entsoe" / f"forecasts_{zone}.csv"
+    if not path.exists():
+        log.info("No forecast CSV for %s — skipping (run pipeline to generate)", zone)
+        return pd.DataFrame()
+
+    log.info("Cleaning ENTSOE forecasts %s from %s", zone, path)
+    raw  = pd.read_csv(path)
+    df   = _utc_index(raw, "timestamp").sort_index()
+    df   = _enforce_hourly(df)
+
+    fcst_cols = [c for c in df.columns if c in [
+        "load_forecast", "wind_generation_forecast", "solar_generation_forecast"]]
+    if not fcst_cols:
+        return df
+
+    for col in ["wind_generation_forecast", "solar_generation_forecast"]:
+        if col in df.columns:
+            df[col] = df[col].clip(lower=0)
+
+    _flag_large_gaps(df, fcst_cols)
+    df = _interpolate(df, fcst_cols)
+    return _save(df, f"forecasts_{zone}.parquet")
+
+
 # ── Weather (Open-Meteo) — unchanged ─────────────────────────────────────────
 
 def clean_weather(zone: str) -> pd.DataFrame:
@@ -235,6 +268,7 @@ def clean_all() -> None:
         clean_entsoe_prices(zone)
         clean_entsoe_generation(zone)
         clean_entsoe_crossborder(zone)
+        clean_entsoe_forecasts(zone)
         clean_weather(zone)
     clean_fuel_prices()
     log.info("=== Cleaning complete ===")

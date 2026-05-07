@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+import holidays as hdays
 from sklearn.metrics import mean_pinball_loss
 
 # Load .env so ENTSOE_TOKEN is available when model.py is run standalone
@@ -113,6 +114,31 @@ def mean_band_width(lo: np.ndarray, hi: np.ndarray) -> float:
     return float((hi - lo).mean())
 
 
+# ── Mondrian bucket ───────────────────────────────────────────────────────────
+
+def _mondrian_bucket(ts: pd.Timestamp, cal) -> int:
+    """
+    Regime bucket for Mondrian conformal calibration.
+
+    0 = normal  (regular weekday, not adjacent to a holiday)
+    1 = risky   (weekend OR holiday OR bridge day within 1 day of holiday)
+
+    Bridge days (e.g. Friday between Thursday holiday and weekend) see atypical
+    demand and price behavior; treating them as normal weekdays produces
+    systematically under-wide intervals for these slots.
+    """
+    d = ts.date()
+    if ts.dayofweek >= 5:          # Saturday=5, Sunday=6
+        return 1
+    if d in cal:                    # public holiday on a weekday
+        return 1
+    prev_day = (ts - pd.Timedelta(days=1)).date()
+    next_day = (ts + pd.Timedelta(days=1)).date()
+    if prev_day in cal or next_day in cal:
+        return 1
+    return 0
+
+
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def train_zone(zdf: pd.DataFrame, zone: str) -> tuple[dict, dict]:
@@ -180,12 +206,19 @@ def feature_importance(qmodels: dict, zone: str) -> None:
 
 # ── CQR calibration ───────────────────────────────────────────────────────────
 
-def calibrate_zone(zdf: pd.DataFrame, qmodels: dict, zone: str) -> dict:
+def calibrate_zone(
+    zdf: pd.DataFrame,
+    qmodels: dict,
+    zone: str,
+    cal_start: str | None = None,
+    cal_end: str | None = None,
+) -> dict:
     """
     Conformalized Quantile Regression (CQR) calibration.
 
-    Calibration window: VAL_END → CAL_END (Jan–May 2026).
-    Held out from both training (ends 2025-01-01) and reported validation (2025).
+    Default calibration window: VAL_END → CAL_END (Jan–May 2026).
+    For backtests pass cal_start/cal_end to use a trailing window just before
+    the prediction start so the calibration stays in-sample relative to the test.
 
     Two corrections:
       q_hat_interval — symmetric EUR/MWh inflation applied to both sides of
@@ -195,12 +228,14 @@ def calibrate_zone(zdf: pd.DataFrame, qmodels: dict, zone: str) -> dict:
 
     CQR guarantee: on exchangeable calibration+test data, coverage ≥ 1−α.
     """
-    cal = zdf[(zdf.index >= VAL_END) & (zdf.index < CAL_END)]
+    _cal_start = cal_start or VAL_END
+    _cal_end   = cal_end   or CAL_END
+    cal = zdf[(zdf.index >= _cal_start) & (zdf.index < _cal_end)]
     cal = cal.dropna(subset=FEATURES + [TARGET])
 
     if len(cal) < 100:
         log.warning("  %s: calibration set too small (%d rows) — CQR skipped", zone, len(cal))
-        return {"interval": 0.0, "p50": 0.0, "n": 0}
+        return {"interval": 0.0, "p50": 0.0, "n": 0, "mondrian": {0: 0.0, 1: 0.0}}
 
     X_cal = cal[FEATURES]
     y_cal = cal[TARGET].values
@@ -224,6 +259,29 @@ def calibrate_zone(zdf: pd.DataFrame, qmodels: dict, zone: str) -> dict:
     q_level50 = min(0.45 * (1 + 1 / n), 1.0)
     q_hat_50  = float(np.quantile(resid_50, q_level50))
 
+    # ── Mondrian: per-regime interval Q_hats ─────────────────────────────────
+    # Bucket 0 = normal weekday; bucket 1 = weekend/holiday/bridge day.
+    # Tighter bands on predictable hours; wider on structurally uncertain ones.
+    _ZONE_COUNTRY_MAP = {"DE-LU": "DE", "ES": "ES"}
+    country  = _ZONE_COUNTRY_MAP.get(zone, "DE")
+    hol_cal  = hdays.country_holidays(country, years=range(
+        int(cal.index.year.min()), int(cal.index.year.max()) + 2))
+    buckets  = np.array([_mondrian_bucket(ts, hol_cal) for ts in cal.index])
+    mondrian = {}
+    for b in [0, 1]:
+        mask_b = buckets == b
+        n_b    = int(mask_b.sum())
+        if n_b < 50:
+            mondrian[b] = q_hat_iv   # too few samples → fall back to global
+        else:
+            q_lev_b    = min(0.95 * (1 + 1 / n_b), 1.0)
+            mondrian[b] = float(np.quantile(scores[mask_b], q_lev_b))
+        if n_b > 0:
+            cov_b = float(((y_cal[mask_b] >= p025[mask_b] - mondrian[b]) &
+                           (y_cal[mask_b] <= p975[mask_b] + mondrian[b])).mean()) * 100
+            log.info("    Mondrian b=%d (n=%d): Q_hat=%.2f  coverage=%.1f%%",
+                     b, n_b, mondrian[b], cov_b)
+
     # ── Diagnostics ───────────────────────────────────────────────────────────
     cov_raw = float(((y_cal >= p025)              & (y_cal <= p975)).mean())              * 100
     cov_cal = float(((y_cal >= p025 - q_hat_iv)   & (y_cal <= p975 + q_hat_iv)).mean())   * 100
@@ -236,7 +294,7 @@ def calibrate_zone(zdf: pd.DataFrame, qmodels: dict, zone: str) -> dict:
     log.info("    p50 shift Q_hat=%.2f EUR/MWh  pinball  raw=%.4f → cal=%.4f",
              q_hat_50, pb_raw, pb_cal)
 
-    return {"interval": q_hat_iv, "p50": q_hat_50, "n": n}
+    return {"interval": q_hat_iv, "p50": q_hat_50, "n": n, "mondrian": mondrian}
 
 
 # ── Long-term seasonal model ──────────────────────────────────────────────────
@@ -434,6 +492,156 @@ def fetch_gap_actuals(zone: str, gap_start: pd.Timestamp, gap_end: pd.Timestamp)
     return gap_df
 
 
+# ── Weather fetch helper (archive or forecast depending on date) ──────────────
+
+def _fetch_weather(zone: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame | None:
+    """
+    Fetch hourly weather for any window — historical forecast API for past dates,
+    forecast API for near-future dates (≤16 days ahead). Returns UTC-indexed
+    DataFrame with columns [temperature, wind_speed, solar_radiation], or None on failure.
+
+    This function is critical for realistic backtesting. It uses the Open-Meteo
+    historical forecast API to get what the forecast *would have been* on a past
+    date, avoiding data leakage from using historical actuals.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from ingestion import _get, WEATHER_LOCATIONS
+
+    loc = WEATHER_LOCATIONS[zone]
+    _today = pd.Timestamp.utcnow().normalize()
+    api_key = os.environ.get("OM_API_KEY")
+
+    frames = []
+
+    # Past portion → historical forecast API (commercial, requires API key)
+    if start < _today:
+        hist_end = min(end, _today - pd.Timedelta(hours=1))
+        if not api_key:
+            log.warning("  OM_API_KEY not set — cannot use historical weather API. Will use proxy.")
+        else:
+            try:
+                d = _get(
+                    "https://historical-forecast-api.open-meteo.com/v1/forecast",
+                    params={
+                        "latitude":        loc["latitude"],
+                        "longitude":       loc["longitude"],
+                        "start_date":      start.strftime("%Y-%m-%d"),
+                        "end_date":        hist_end.strftime("%Y-%m-%d"),
+                        "hourly":          "temperature_2m,wind_speed_10m,shortwave_radiation",
+                        "timezone":        "UTC",
+                        "wind_speed_unit": "ms",
+                    },
+                    api_key=api_key
+                )
+                h = d.get("hourly", {})
+                if h.get("time"):
+                    frames.append(pd.DataFrame({
+                        "temperature":     h["temperature_2m"],
+                        "wind_speed":      h["wind_speed_10m"],
+                        "solar_radiation": h["shortwave_radiation"],
+                    }, index=pd.to_datetime(h["time"], utc=True)))
+                    log.info("  Weather hist-forecast %s: %d rows", zone, len(frames[-1]))
+            except Exception as exc:
+                log.warning("  Weather hist-forecast %s failed: %s — proxy", zone, exc)
+
+    # Future portion → forecast API (capped at 14 days)
+    _FCST_LIMIT = 14
+    fcst_start = max(start, _today)
+    fcst_end   = min(end, _today + pd.Timedelta(days=_FCST_LIMIT))
+    if fcst_start <= fcst_end and fcst_start < end:
+        try:
+            from ingestion import fetch_weather_forecast as _fwf
+            raw = _fwf(zone, fcst_start.strftime("%Y-%m-%d"), fcst_end.strftime("%Y-%m-%d"))
+            df  = pd.DataFrame({
+                "temperature":     raw["temperature"],
+                "wind_speed":      raw["wind_speed"],
+                "solar_radiation": raw["solar_radiation"],
+            }, index=pd.to_datetime(raw["time"], utc=True))
+            frames.append(df)
+            log.info("  Weather forecast %s: %d rows", zone, len(df))
+        except Exception as exc:
+            log.warning("  Weather forecast %s failed: %s — proxy", zone, exc)
+
+    if not frames:
+        return None
+    return pd.concat(frames).sort_index()
+
+
+# ── ENTSOE day-ahead generation forecast (eval window) ───────────────────────
+
+def fetch_entsoe_gen_forecast(
+    zone: str, fcst_start: pd.Timestamp, fcst_end: pd.Timestamp
+) -> pd.DataFrame:
+    """
+    Fetch ENTSOE day-ahead load + wind/solar forecasts for the eval window.
+
+    These are published ~12-24h before delivery — exactly the information available
+    at auction time. Using them for the eval window gives better feature quality
+    than the same-weekday-hour proxy (which can miss weather-driven anomalies).
+
+    Returns a DataFrame indexed by UTC timestamp with columns:
+      load, wind_generation, solar_generation  (matching training feature names)
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from config import ENTSOE_TOKEN, ENTSOE_ZONES, ENTSOE_WIND_TYPES, ENTSOE_SOLAR_TYPES
+
+    if not ENTSOE_TOKEN:
+        log.warning("ENTSOE_TOKEN not set — skipping gen forecast fetch")
+        return pd.DataFrame()
+
+    try:
+        from entsoe import EntsoePandasClient
+    except ImportError:
+        log.warning("entsoe-py not installed — skipping gen forecast fetch")
+        return pd.DataFrame()
+
+    client  = EntsoePandasClient(api_key=ENTSOE_TOKEN)
+    eic     = ENTSOE_ZONES[zone]
+    q_start = pd.Timestamp(fcst_start.date().isoformat(), tz="Europe/Brussels")
+    q_end   = pd.Timestamp((fcst_end + pd.Timedelta(days=1)).date().isoformat(), tz="Europe/Brussels")
+
+    result: dict[str, pd.Series] = {}
+
+    # Load forecast
+    try:
+        lf = client.query_load_forecast(eic, start=q_start, end=q_end)
+        if isinstance(lf, pd.DataFrame):
+            lf = lf.iloc[:, 0]
+        lf = lf.tz_convert("UTC").resample("h").mean()
+        result["load"] = lf
+        log.info("  ENTSOE load forecast %s: %d rows", zone, len(lf))
+    except Exception as exc:
+        log.warning("  ENTSOE load forecast %s: %s", zone, exc)
+
+    # Wind + solar forecast
+    try:
+        ws = client.query_wind_and_solar_forecast(eic, start=q_start, end=q_end)
+        ws = ws.tz_convert("UTC")
+        if ws.index.to_series().diff().dropna().min() < pd.Timedelta("1h"):
+            ws = ws.resample("h").mean()
+        if isinstance(ws.columns, pd.MultiIndex):
+            ws.columns = ws.columns.get_level_values(0)
+        wind_cols  = [c for c in ws.columns if any(t in str(c) for t in ENTSOE_WIND_TYPES)]
+        solar_cols = [c for c in ws.columns if any(t in str(c) for t in ENTSOE_SOLAR_TYPES)]
+        if wind_cols:
+            result["wind_generation"]  = ws[wind_cols].sum(axis=1).clip(lower=0)
+        if solar_cols:
+            result["solar_generation"] = ws[solar_cols].sum(axis=1).clip(lower=0)
+        log.info("  ENTSOE wind/solar forecast %s: %d rows", zone, len(ws))
+    except Exception as exc:
+        log.warning("  ENTSOE wind/solar forecast %s: %s", zone, exc)
+
+    if not result:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(result)
+    df = df[(df.index >= fcst_start) & (df.index <= fcst_end)]
+    log.info("  Gen forecast %s: %d rows, cols=%s", zone, len(df), list(df.columns))
+    return df
+
+
 # ── Eval-window feature construction ─────────────────────────────────────────
 
 def build_eval_row(
@@ -444,14 +652,16 @@ def build_eval_row(
     predicted_p50: dict,
     cal,
     weather_fcst: pd.DataFrame | None = None,
-) -> dict:
+    gen_fcst: pd.DataFrame | None = None,
+    prev_residual_load: float | None = None,
+) -> tuple[dict, float]:
     """
     Build one feature row for a single eval-window timestamp.
 
     Called sequentially so predicted_p50 is populated with all prior slots
     before this row is built — enabling honest recursive lag_1 / lag_24 fill.
 
-    Generation/load (future unknown): same-weekday-hour mean from last 4 weeks.
+    Generation/load: ENTSOE day-ahead forecast if provided, else same-weekday-hour proxy.
     Weather: Open-Meteo 10-day forecast if provided, else same-weekday-hour proxy.
     Lags: actual prices where available; predicted p50 where recursive.
     """
@@ -468,6 +678,30 @@ def build_eval_row(
             row[col] = float(same_hw[col].mean()) if len(same_hw) > 0 else float(ref[col].mean())
         else:
             row[col] = 0.0
+
+    # Override load/wind/solar with ENTSOE day-ahead forecast when all three are available.
+    # Only override if all three columns are present and non-null to avoid partial mismatch
+    # in the derived residual_load / renewable_penetration features.
+    if (gen_fcst is not None and ts in gen_fcst.index and
+            all(c in gen_fcst.columns for c in ["load", "wind_generation", "solar_generation"]) and
+            not any(pd.isna(gen_fcst.loc[ts, c]) for c in ["load", "wind_generation", "solar_generation"])):
+        row["load"]             = float(gen_fcst.loc[ts, "load"])
+        row["wind_generation"]  = float(gen_fcst.loc[ts, "wind_generation"])
+        row["solar_generation"] = float(gen_fcst.loc[ts, "solar_generation"])
+        # Recompute derived features from forecast values
+        row["residual_load"] = max(0.0, row["load"] - row["wind_generation"] - row["solar_generation"])
+        if row["load"] > 0:
+            row["renewable_penetration"] = min(1.0,
+                (row["wind_generation"] + row["solar_generation"]) / row["load"])
+
+    # Recompute ramp and clip to prevent proxy-driven spikes.
+    # The historical 1st-99th percentile range is approx. -2500 to 5000 MW/hr.
+    if prev_residual_load is not None:
+        ramp = row["residual_load"] - prev_residual_load
+    else:
+        # Fallback for the first hour: use the proxy value directly.
+        ramp = row["residual_load_ramp"]
+    row["residual_load_ramp"] = np.clip(ramp, -2500, 5000)
 
     # ── Weather: forecast if available, else same-weekday-hour proxy ──────────
     weather_cols = ["temperature", "wind_speed", "solar_radiation"]
@@ -529,7 +763,7 @@ def build_eval_row(
     row["price_roll_24h"]  = float(zdf["price"].iloc[-24:].mean())
     row["price_roll_168h"] = float(zdf["price"].iloc[-168:].mean())
 
-    return row
+    return row, row["residual_load"]
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -582,7 +816,6 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
     log.info("━" * 56)
     log.info("Generating predictions (CQR-adjusted)")
 
-    import holidays as hdays
     _ZONE_COUNTRY = {"DE-LU": "DE", "ES": "ES"}
 
     # Hackathon eval window defaults; override via --start / --end
@@ -593,31 +826,36 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
     eval_idx   = pd.date_range(eval_start, eval_end, freq="h")
     log.info("  Window: %s → %s  (%d slots)", eval_start, eval_end, len(eval_idx))
 
-    # Fetch Open-Meteo forecast — only for the short-term portion (≤16 days)
-    # Long-term slots use the seasonal profile; no point fetching a 2-year forecast.
-    from ingestion import fetch_weather_forecast as _fetch_wx_fcst
-    _WX_FCST_LIMIT_DAYS = 14
+    # Fetch weather: archive API for past slots, forecast API for near-future slots.
+    # Long-term slots (>14 days out) use the seasonal proxy.
     _today = pd.Timestamp.utcnow().normalize()
-    fcst_end_capped = min(eval_end, _today + pd.Timedelta(days=_WX_FCST_LIMIT_DAYS))
+    _WX_LIMIT_DAYS = 14
+    wx_fetch_end = min(eval_end, _today + pd.Timedelta(days=_WX_LIMIT_DAYS))
     zone_weather_fcst: dict[str, pd.DataFrame | None] = {}
-    if fcst_end_capped > eval_start:
-        fcst_date_start = eval_start.strftime("%Y-%m-%d")
-        fcst_date_end   = fcst_end_capped.strftime("%Y-%m-%d")
+    if wx_fetch_end >= eval_start:
         for zone in ZONES:
-            try:
-                raw = _fetch_wx_fcst(zone, fcst_date_start, fcst_date_end)
-                raw["time"] = pd.to_datetime(raw["time"], utc=True)
-                raw = raw.set_index("time")
-                zone_weather_fcst[zone] = raw
-                log.info("  Weather forecast %s: %d rows (%s → %s)",
-                         zone, len(raw), fcst_date_start, fcst_date_end)
-            except Exception as exc:
-                log.warning("  Weather forecast fetch failed for %s: %s — proxy", zone, exc)
-                zone_weather_fcst[zone] = None
+            zone_weather_fcst[zone] = _fetch_weather(zone, eval_start, wx_fetch_end)
     else:
-        log.info("  Window beyond 14-day forecast horizon — using seasonal proxy for all slots")
+        log.info("  Window beyond 14-day horizon — using seasonal proxy for weather")
         for zone in ZONES:
             zone_weather_fcst[zone] = None
+
+    # Fetch ENTSOE day-ahead generation + load forecasts for the short-term portion.
+    # These are the actual pre-auction forecasts published by grid operators — better
+    # than the same-weekday-hour proxy for generation/load features.
+    fcst_end_capped = wx_fetch_end
+    zone_gen_fcst: dict[str, pd.DataFrame | None] = {}
+    if fcst_end_capped >= eval_start:
+        for zone in ZONES:
+            try:
+                gf = fetch_entsoe_gen_forecast(zone, eval_start, fcst_end_capped)
+                zone_gen_fcst[zone] = gf if len(gf) > 0 else None
+            except Exception as exc:
+                log.warning("  Gen forecast fetch failed for %s: %s — proxy", zone, exc)
+                zone_gen_fcst[zone] = None
+    else:
+        for zone in ZONES:
+            zone_gen_fcst[zone] = None
 
     zone_preds = {}
     for zone in ZONES:
@@ -643,17 +881,29 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
         p025_list, p50_list, p975_list = [], [], []
         regime_log = {"shortterm": 0, "longterm": 0}
 
-        q_iv    = cqr[zone]["interval"]
-        q_50    = cqr[zone]["p50"]
-        lt      = lt_models[zone]
-        zdf_tail = zdf.index[-1]   # reference point for horizon calculation
+        q_50        = cqr[zone]["p50"]
+        mondrian_iv = cqr[zone]["mondrian"]   # {0: Q_hat_normal, 1: Q_hat_risky}
+        lt          = lt_models[zone]
+        zdf_tail    = zdf.index[-1]   # reference point for horizon calculation
+        gen_fcst    = zone_gen_fcst[zone]
+
+        # Initialize with the last known residual load from the dataset for correct
+        # ramp calculation in the first prediction slot.
+        prev_residual_load = zdf["residual_load"].iloc[-1] if "residual_load" in zdf else None
 
         for ts in eval_idx:
             horizon_days = (ts - zdf_tail).total_seconds() / 86400.0
+            # Mondrian bucket — determines which Q_hat to apply for interval
+            bucket   = _mondrian_bucket(ts, cal)
+            q_iv_slot = mondrian_iv[bucket]
 
             if horizon_days <= SHORTTERM_DAYS:
-                # ── Short-term: LightGBM + CQR ────────────────────────────────
-                row  = build_eval_row(zdf, ref, zone, ts, predicted_p50, cal, weather_fcst)
+                # ── Short-term: LightGBM + Mondrian CQR ──────────────────────
+                row, current_residual_load = build_eval_row(
+                    zdf, ref, zone, ts, predicted_p50, cal,
+                    weather_fcst, gen_fcst, prev_residual_load
+                )
+                prev_residual_load = current_residual_load
                 x    = pd.DataFrame([row])[FEATURES]
 
                 p025 = float(all_models[zone][0.025].predict(x)[0])
@@ -664,8 +914,8 @@ def main(predict: bool = False, pred_start: str | None = None, pred_end: str | N
                 p975 = max(p975, p50)
 
                 p50  = p50  + q_50
-                p025 = p025 - q_iv
-                p975 = p975 + q_iv
+                p025 = p025 - q_iv_slot
+                p975 = p975 + q_iv_slot
 
                 p025 = min(p025, p50)
                 p975 = max(p975, p50)

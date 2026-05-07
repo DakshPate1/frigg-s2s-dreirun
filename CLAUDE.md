@@ -110,16 +110,27 @@ python model.py --predict --start "2025-06-01 00:00" --end "2025-06-02 23:00"
 When `--predict` runs it automatically:
 1. Fetches ENTSOE prices + cross-border flows for gap between training tail and eval start (`fetch_gap_actuals`) — gives lag_24 real values instead of averages
 2. Fetches Open-Meteo forecast (capped at 14 days) — replaces seasonal proxy for temperature/wind/solar_radiation on near-term slots
-3. Routes each slot by horizon:
-   - **≤ `SHORTTERM_DAYS` (7d)** from training tail → LightGBM + CQR
+3. Fetches ENTSOE day-ahead load+wind+solar generation forecasts (`fetch_entsoe_gen_forecast`) — replaces proxy for generation/load on near-term slots if published; falls back to proxy gracefully
+4. Routes each slot by horizon:
+   - **≤ `SHORTTERM_DAYS` (7d)** from training tail → LightGBM + Mondrian CQR
    - **> 7d** → long-term seasonal model (no CQR; own uncertainty)
-4. Outputs `alpine-arbitrage_predictions.csv`
+5. Outputs `alpine-arbitrage_predictions.csv`
+
+## CQR calibration (Mondrian)
+
+`calibrate_zone()` computes both global and per-regime Q_hats (Jan–May 2026, n≈2998/zone):
+- **Bucket 0** (normal weekday, not adjacent to holiday): larger Q_hat — weekday prediction was harder to calibrate in Jan–May 2026
+- **Bucket 1** (weekend OR holiday OR bridge day): smaller Q_hat — weekend patterns were more predictable
+
+`_mondrian_bucket(ts, cal) → int` classifies each timestamp. Bridge days = any weekday within 1 day of a public holiday.
+
+ENTSOE forecast pipeline infrastructure is fully implemented (`fetch_entsoe_forecasts` in ingestion.py, `clean_entsoe_forecasts` in cleaning.py, forecast join in alignment.py, `add_derived_forecasts` in features.py). Run a full pipeline to get `_forecast` columns. To use them in training, add `load_forecast`, `wind_generation_forecast`, `solar_generation_forecast`, `residual_load_forecast`, `renewable_penetration_forecast`, `residual_load_ramp_forecast` to `FEATURES` in model.py — the `active_features` filter handles graceful fallback to actuals if the columns are absent.
 
 ## Forecasting regimes
 
 | Horizon | Model | Features | Uncertainty |
 |---|---|---|---|
-| ≤ 7 days | Quantile LightGBM | All 29 features + recursive lags | CQR-calibrated ±interval |
+| ≤ 7 days | Quantile LightGBM | All 29 features + recursive lags | Mondrian CQR ±Q_hat per regime |
 | > 7 days | Seasonal profile + trend | month × weekday × hour median + post-crisis annual trend | resid_std × 1.96 × sqrt-scale |
 
 **Long-term model (`build_longterm_model`):**

@@ -56,6 +56,27 @@ def add_derived(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_derived_forecasts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute derived features from day-ahead forecast columns.
+
+    Only runs if all three forecast columns are present (i.e., ENTSOE forecast
+    pipeline has been run). Mirrors add_derived but uses _forecast suffixed columns.
+    """
+    needed = ["load_forecast", "wind_generation_forecast", "solar_generation_forecast"]
+    if not all(c in df.columns for c in needed):
+        return df
+    df = df.copy()
+    df["residual_load_forecast"] = (
+        df["load_forecast"] - df["wind_generation_forecast"] - df["solar_generation_forecast"]
+    ).clip(lower=0)
+    df["renewable_penetration_forecast"] = (
+        (df["wind_generation_forecast"] + df["solar_generation_forecast"]) /
+        df["load_forecast"].replace(0, np.nan)
+    ).clip(0, 1).fillna(0)
+    return df
+
+
 def add_temporal(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     ts = df.index.get_level_values("timestamp")
@@ -152,6 +173,9 @@ def add_lags(df: pd.DataFrame) -> pd.DataFrame:
         # needs to ramp expensive gas turbines. Large positive ramp → spike risk.
         zone_df["residual_load_ramp"] = zone_df["residual_load"].diff(1)
 
+        if "residual_load_forecast" in zone_df.columns:
+            zone_df["residual_load_ramp_forecast"] = zone_df["residual_load_forecast"].diff(1)
+
         zone_df["zone"] = zone
         frames.append(zone_df)
 
@@ -167,6 +191,7 @@ def engineer_features(drop_lag_na: bool = True) -> pd.DataFrame:
     df = pd.read_parquet(path)
 
     df = add_derived(df)
+    df = add_derived_forecasts(df)
     df = add_temporal(df)
     df = add_lags(df)
     df = add_holidays(df)
