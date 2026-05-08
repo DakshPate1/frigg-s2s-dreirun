@@ -1,0 +1,28 @@
+# Long-term Frigg pipeline — Python dependencies
+# Tested with Python 3.13. Install into the project venv:
+#     pip install -r requirements.txt
+#
+# Many of these come pre-installed in the parent Frigg/.venv used by the
+# short-term pipeline. The pinned versions below are known-working as of May 2026.
+
+# Data + I/O
+pandas>=2.0
+numpy>=1.24
+pyarrow>=15.0           # parquet read/write
+python-dotenv>=1.0      # loads ENTSOE_API_TOKEN from Frigg/.env
+requests>=2.31
+
+# ENTSOE Transparency Platform client
+entsoe-py==0.8.0
+
+# Yahoo Finance (TTF gas, KRBN carbon, coal API2, Brent oil)
+yfinance>=0.2
+
+# GPR (geopolitical risk index, Iacoviello) — XLS download
+xlrd>=2.0.1
+
+# Plotting (notebook)
+matplotlib>=3.7
+seaborn>=0.13
+jupyter>=1.0
+nbconvert>=7.0

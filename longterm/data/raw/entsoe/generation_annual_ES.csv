@@ -1,0 +1,130 @@
+year,zone,psr_type,generation_twh
+2017,ES,Biomass,0.000282
+2018,ES,Biomass,2.950992
+2019,ES,Biomass,2.920634
+2020,ES,Biomass,3.832454
+2021,ES,Biomass,4.155303
+2022,ES,Biomass,4.047153
+2023,ES,Biomass,3.0976823333333336
+2024,ES,Biomass,3.431484
+2025,ES,Biomass,3.672534
+2026,ES,Biomass,1.10353
+2018,ES,Fossil Brown coal/Lignite,3.090711
+2019,ES,Fossil Brown coal/Lignite,0.522078
+2017,ES,Fossil Gas,0.003471
+2018,ES,Fossil Gas,50.964129
+2019,ES,Fossil Gas,77.036018
+2020,ES,Fossil Gas,61.566016
+2021,ES,Fossil Gas,61.622696
+2022,ES,Fossil Gas,77.2429202
+2023,ES,Fossil Gas,54.394531
+2024,ES,Fossil Gas,42.425966
+2025,ES,Fossil Gas,51.91106633333334
+2026,ES,Fossil Gas,13.993956
+2017,ES,Fossil Hard coal,0.000996
+2018,ES,Fossil Hard coal,32.343229
+2019,ES,Fossil Hard coal,10.567188
+2020,ES,Fossil Hard coal,5.137216
+2021,ES,Fossil Hard coal,5.142871
+2022,ES,Fossil Hard coal,7.914373599999999
+2023,ES,Fossil Hard coal,3.9419323333333334
+2024,ES,Fossil Hard coal,2.978394
+2025,ES,Fossil Hard coal,1.306884
+2026,ES,Fossil Hard coal,0.033277
+2017,ES,Fossil Oil,0.000194
+2018,ES,Fossil Oil,2.471836
+2019,ES,Fossil Oil,2.170912
+2020,ES,Fossil Oil,1.843412
+2021,ES,Fossil Oil,1.317642
+2022,ES,Fossil Oil,1.1296848000000002
+2023,ES,Fossil Oil,0.43326533333333334
+2024,ES,Fossil Oil,0.306723
+2025,ES,Fossil Oil,0.24211133333333335
+2026,ES,Fossil Oil,0.058444
+2017,ES,Hydro Run-of-river and poundage,0.001076
+2018,ES,Hydro Run-of-river and poundage,10.716699
+2019,ES,Hydro Run-of-river and poundage,8.731307
+2020,ES,Hydro Run-of-river and poundage,10.102814
+2021,ES,Hydro Run-of-river and poundage,8.525098
+2022,ES,Hydro Run-of-river and poundage,6.755770200000001
+2023,ES,Hydro Run-of-river and poundage,7.245276666666667
+2024,ES,Hydro Run-of-river and poundage,8.814861
+2025,ES,Hydro Run-of-river and poundage,8.347966333333334
+2026,ES,Hydro Run-of-river and poundage,3.562973
+2017,ES,Hydro Water Reservoir,0.001162
+2018,ES,Hydro Water Reservoir,25.411295
+2019,ES,Hydro Water Reservoir,17.939376
+2020,ES,Hydro Water Reservoir,23.59321
+2021,ES,Hydro Water Reservoir,24.148593
+2022,ES,Hydro Water Reservoir,15.067831
+2023,ES,Hydro Water Reservoir,16.99684633333333
+2024,ES,Hydro Water Reservoir,23.071187
+2025,ES,Hydro Water Reservoir,21.74003766666667
+2026,ES,Hydro Water Reservoir,9.697136
+2017,ES,Nuclear,0.007057
+2018,ES,Nuclear,53.272325
+2019,ES,Nuclear,55.93001
+2020,ES,Nuclear,55.814401
+2021,ES,Nuclear,54.202661
+2022,ES,Nuclear,56.1616902
+2023,ES,Nuclear,54.37862066666666
+2024,ES,Nuclear,52.328509
+2025,ES,Nuclear,51.91237366666667
+2026,ES,Nuclear,17.174499
+2017,ES,Other,5.2e-05
+2018,ES,Other,0.468025
+2019,ES,Other,0.386617
+2020,ES,Other,0.431509
+2021,ES,Other,0.469819
+2022,ES,Other,0.26081
+2023,ES,Other,0.096057
+2024,ES,Other,0.192374
+2025,ES,Other,0.061345
+2026,ES,Other,0.019653
+2017,ES,Other renewable,7.9e-05
+2018,ES,Other renewable,0.857463
+2019,ES,Other renewable,0.858763
+2020,ES,Other renewable,0.883507
+2021,ES,Other renewable,0.883649
+2022,ES,Other renewable,0.8429232
+2023,ES,Other renewable,0.709507
+2024,ES,Other renewable,0.660097
+2025,ES,Other renewable,0.6034
+2026,ES,Other renewable,0.189694
+2017,ES,Solar,9e-06
+2018,ES,Solar,12.023772
+2019,ES,Solar,14.421349
+2020,ES,Solar,20.030943
+2021,ES,Solar,25.354481
+2022,ES,Solar,31.089640600000003
+2023,ES,Solar,40.432584
+2024,ES,Solar,47.31891
+2025,ES,Solar,52.387222
+2026,ES,Solar,15.013557
+2017,ES,Waste,0.000237
+2018,ES,Waste,2.616663
+2019,ES,Waste,2.515107
+2020,ES,Waste,2.291704
+2021,ES,Waste,2.474904
+2022,ES,Waste,2.2615428
+2023,ES,Waste,2.184384
+2024,ES,Waste,1.850511
+2025,ES,Waste,1.6442426666666667
+2026,ES,Waste,0.468799
+2017,ES,Wind Onshore,0.012348
+2018,ES,Wind Onshore,48.90668
+2019,ES,Wind Onshore,52.348144
+2020,ES,Wind Onshore,53.155566
+2021,ES,Wind Onshore,59.014209
+2022,ES,Wind Onshore,58.8272366
+2023,ES,Wind Onshore,61.075408
+2024,ES,Wind Onshore,58.975484
+2025,ES,Wind Onshore,55.457599
+2026,ES,Wind Onshore,22.321121
+2022,ES,Hydro Pumped Storage,0.452732
+2023,ES,Hydro Pumped Storage,6.905894333333333
+2024,ES,Hydro Pumped Storage,8.056277
+2025,ES,Hydro Pumped Storage,9.060336666666666
+2026,ES,Hydro Pumped Storage,3.42094
+2025,ES,Energy storage,0.000791
+2026,ES,Energy storage,0.004158

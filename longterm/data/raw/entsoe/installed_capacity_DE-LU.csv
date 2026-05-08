@@ -1,0 +1,148 @@
+year,psr_type,capacity_mw,zone
+2018,Biomass,7398.49,DE-LU
+2018,Fossil Brown coal/Lignite,21275.0,DE-LU
+2018,Fossil Gas,31442.0,DE-LU
+2018,Fossil Hard coal,25035.0,DE-LU
+2018,Fossil Oil,4271.0,DE-LU
+2018,Geothermal,38.2,DE-LU
+2018,Hydro Pumped Storage,8918.24,DE-LU
+2018,Hydro Run-of-river and poundage,3885.06,DE-LU
+2018,Hydro Water Reservoir,1451.0,DE-LU
+2018,Nuclear,9516.0,DE-LU
+2018,Other,1421.0,DE-LU
+2018,Other renewable,496.3,DE-LU
+2018,Solar,42805.25,DE-LU
+2018,Waste,1707.0,DE-LU
+2018,Wind Offshore,5051.0,DE-LU
+2018,Wind Onshore,51787.0,DE-LU
+2019,Biomass,7782.13,DE-LU
+2019,Fossil Brown coal/Lignite,21205.0,DE-LU
+2019,Fossil Gas,31745.0,DE-LU
+2019,Fossil Hard coal,25293.0,DE-LU
+2019,Fossil Oil,4356.0,DE-LU
+2019,Geothermal,41.75,DE-LU
+2019,Hydro Pumped Storage,9422.0,DE-LU
+2019,Hydro Run-of-river and poundage,4007.92,DE-LU
+2019,Hydro Water Reservoir,1309.0,DE-LU
+2019,Nuclear,9516.0,DE-LU
+2019,Other,1235.0,DE-LU
+2019,Other renewable,444.59,DE-LU
+2019,Solar,45434.98,DE-LU
+2019,Waste,1707.0,DE-LU
+2019,Wind Offshore,6393.0,DE-LU
+2019,Wind Onshore,52945.63,DE-LU
+2020,Biomass,8033.63,DE-LU
+2020,Fossil Brown coal/Lignite,21067.0,DE-LU
+2020,Fossil Gas,31793.06,DE-LU
+2020,Fossil Hard coal,22458.4,DE-LU
+2020,Fossil Oil,4372.53,DE-LU
+2020,Geothermal,47.46,DE-LU
+2020,Hydro Pumped Storage,9421.5,DE-LU
+2020,Hydro Run-of-river and poundage,3994.71,DE-LU
+2020,Hydro Water Reservoir,1308.5,DE-LU
+2020,Nuclear,8114.0,DE-LU
+2020,Other,1557.77,DE-LU
+2020,Other renewable,407.46,DE-LU
+2020,Solar,48376.4,DE-LU
+2020,Waste,1681.6,DE-LU
+2020,Wind Offshore,7503.69,DE-LU
+2020,Wind Onshore,53338.15,DE-LU
+2021,Biomass,8447.08,DE-LU
+2021,Fossil Brown coal/Lignite,20487.0,DE-LU
+2021,Fossil Gas,32038.23,DE-LU
+2021,Fossil Hard coal,23499.4,DE-LU
+2021,Fossil Oil,4184.36,DE-LU
+2021,Geothermal,43.86,DE-LU
+2021,Hydro Pumped Storage,9421.5,DE-LU
+2021,Hydro Run-of-river and poundage,3838.78,DE-LU
+2021,Hydro Water Reservoir,1308.5,DE-LU
+2021,Nuclear,8114.0,DE-LU
+2021,Other,1638.77,DE-LU
+2021,Other renewable,420.27,DE-LU
+2021,Solar,53537.92,DE-LU
+2021,Waste,1660.6,DE-LU
+2021,Wind Offshore,7773.82,DE-LU
+2021,Wind Onshore,54666.17,DE-LU
+2022,Biomass,8378.89,DE-LU
+2022,Fossil Brown coal/Lignite,18544.29,DE-LU
+2022,Fossil Gas,30648.72,DE-LU
+2022,Fossil Hard coal,18829.51,DE-LU
+2022,Fossil Oil,3966.28,DE-LU
+2022,Geothermal,50.9,DE-LU
+2022,Hydro Pumped Storage,9379.24,DE-LU
+2022,Hydro Run-of-river and poundage,3684.53,DE-LU
+2022,Hydro Water Reservoir,1309.0,DE-LU
+2022,Nuclear,4056.0,DE-LU
+2022,Other,1678.83,DE-LU
+2022,Other renewable,352.43,DE-LU
+2022,Solar,58002.29,DE-LU
+2022,Waste,1619.5,DE-LU
+2022,Wind Offshore,7786.82,DE-LU
+2022,Wind Onshore,55456.32,DE-LU
+2023,Biomass,8513.8,DE-LU
+2023,Fossil Brown coal/Lignite,17692.0,DE-LU
+2023,Fossil Coal-derived gas,1257.0,DE-LU
+2023,Fossil Gas,31878.0,DE-LU
+2023,Fossil Hard coal,18559.0,DE-LU
+2023,Fossil Oil,4083.0,DE-LU
+2023,Geothermal,55.61,DE-LU
+2023,Hydro Pumped Storage,9379.0,DE-LU
+2023,Hydro Run-of-river and poundage,3737.25,DE-LU
+2023,Hydro Water Reservoir,1345.0,DE-LU
+2023,Nuclear,4056.0,DE-LU
+2023,Other,1706.0,DE-LU
+2023,Other renewable,384.15,DE-LU
+2023,Solar,63366.03,DE-LU
+2023,Waste,1933.0,DE-LU
+2023,Wind Offshore,8128.82,DE-LU
+2023,Wind Onshore,57741.55,DE-LU
+2024,Biomass,8659.54,DE-LU
+2024,Fossil Brown coal/Lignite,18365.0,DE-LU
+2024,Fossil Coal-derived gas,1257.0,DE-LU
+2024,Fossil Gas,36327.0,DE-LU
+2024,Fossil Hard coal,18411.0,DE-LU
+2024,Fossil Oil,4118.0,DE-LU
+2024,Geothermal,54.0,DE-LU
+2024,Hydro Pumped Storage,9449.0,DE-LU
+2024,Hydro Run-of-river and poundage,3752.8,DE-LU
+2024,Hydro Water Reservoir,1392.0,DE-LU
+2024,Other,1630.0,DE-LU
+2024,Other renewable,356.45,DE-LU
+2024,Solar,77015.56,DE-LU
+2024,Waste,1832.0,DE-LU
+2024,Wind Offshore,8456.0,DE-LU
+2024,Wind Onshore,60048.62,DE-LU
+2025,Biomass,8851.0,DE-LU
+2025,Energy storage,11009.0,DE-LU
+2025,Fossil Brown coal/Lignite,15178.0,DE-LU
+2025,Fossil Coal-derived gas,1915.0,DE-LU
+2025,Fossil Gas,36681.56,DE-LU
+2025,Fossil Hard coal,15951.0,DE-LU
+2025,Fossil Oil,6913.83,DE-LU
+2025,Geothermal,46.0,DE-LU
+2025,Hydro Pumped Storage,9383.8,DE-LU
+2025,Hydro Run-of-river and poundage,3923.0,DE-LU
+2025,Hydro Water Reservoir,1459.78,DE-LU
+2025,Other,2278.52,DE-LU
+2025,Other renewable,399.67,DE-LU
+2025,Solar,86951.58,DE-LU
+2025,Waste,1887.0,DE-LU
+2025,Wind Offshore,9215.0,DE-LU
+2025,Wind Onshore,63403.17,DE-LU
+2026,Biomass,8855.9,DE-LU
+2026,Energy storage,14025.81,DE-LU
+2026,Fossil Brown coal/Lignite,14808.4,DE-LU
+2026,Fossil Coal-derived gas,1791.0,DE-LU
+2026,Fossil Gas,35678.02,DE-LU
+2026,Fossil Hard coal,15307.73,DE-LU
+2026,Fossil Oil,3929.69,DE-LU
+2026,Geothermal,75.55,DE-LU
+2026,Hydro Pumped Storage,9401.8,DE-LU
+2026,Hydro Run-of-river and poundage,4116.15,DE-LU
+2026,Hydro Water Reservoir,1459.8,DE-LU
+2026,Other,2030.47,DE-LU
+2026,Other renewable,329.15,DE-LU
+2026,Solar,104029.51,DE-LU
+2026,Waste,1952.55,DE-LU
+2026,Wind Offshore,9226.42,DE-LU
+2026,Wind Onshore,67922.93,DE-LU
