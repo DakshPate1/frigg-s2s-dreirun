@@ -1063,7 +1063,7 @@ def main(predict: bool = False, pred_start: str | None = None,
 
     # Sanity checks — row count only enforced for default eval window
     if pred_start is None and pred_end is None:
-        assert len(out) == 48, f"Expected 48 rows, got {len(out)}"
+        assert len(out) == 24, f"Expected 24 rows, got {len(out)}"
     assert (out["DE-LU p025"] < out["DE-LU p50"]).all(),  "DE-LU p025 >= p50 violation"
     assert (out["DE-LU p50"]  < out["DE-LU p975"]).all(), "DE-LU p50 >= p975 violation"
     assert (out["ES p025"]    < out["ES p50"]).all(),      "ES p025 >= p50 violation"

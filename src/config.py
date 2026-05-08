@@ -184,10 +184,10 @@ CRISIS_END   = "2022-12-31"
 # ── Evaluation window ──────────────────────────────────────────────────────────
 # Monday 11 May 2026 02:00 CEST → Tuesday 12 May 2026 01:00 CEST (inclusive)
 # CEST = UTC+2 in May
-# = 48 hourly slots
+# = 24 hourly slots (00:00 UTC → 23:00 UTC on May 11)
 EVAL_START = "2026-05-11T02:00:00+02:00"
 EVAL_END   = "2026-05-12T01:00:00+02:00"
-EVAL_HOURS = 48
+EVAL_HOURS = 24
 
 # ── Generation type mapping (energy-charts → canonical names) ──────────────────
 WIND_TYPES  = ["Wind offshore", "Wind onshore"]
