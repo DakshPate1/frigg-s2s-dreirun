@@ -18,6 +18,7 @@ Changes vs original:
 
 from __future__ import annotations
 
+import socket
 import time
 import logging
 from pathlib import Path
@@ -29,6 +30,11 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
+
+# Global socket timeout — prevents entsoe-py calls from hanging indefinitely.
+# Any single network read/write blocks at most 120s, then raises socket.timeout
+# which propagates as an exception caught by each fetch function's try/except.
+socket.setdefaulttimeout(120)
 
 from config import (
     DATA_RAW, ZONES,

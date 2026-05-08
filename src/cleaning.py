@@ -185,12 +185,29 @@ def clean_weather(zone: str) -> pd.DataFrame:
     log.info("Cleaning weather %s from %s", zone, path)
     raw = pd.read_csv(path)
     df  = _utc_index(raw, "time").sort_index()
-    df  = df[["temperature", "wind_speed", "solar_radiation"]]
-    df  = _enforce_hourly(df)
-    cols = ["temperature", "wind_speed", "solar_radiation"]
-    _flag_large_gaps(df, cols)
-    df  = _interpolate(df, cols)
-    df["solar_radiation"] = df["solar_radiation"].clip(lower=0)
+
+    # Multi-city format has columns like DE_wind_wind_speed_100m, DE_demand_temperature_2m.
+    # Pass all columns through and create legacy aliases so alignment CRITICAL_COLS pass.
+    multi_city = any("_wind_speed_100m" in c or "_temperature_2m" in c for c in df.columns)
+    if multi_city:
+        temp_col  = next((c for c in df.columns if "_temperature_2m"       in c), None)
+        wind_col  = next((c for c in df.columns if "_wind_speed_100m"      in c), None)
+        solar_col = next((c for c in df.columns if "_shortwave_radiation"  in c), None)
+        if temp_col:
+            df["temperature"]     = df[temp_col]
+        if wind_col:
+            df["wind_speed"]      = df[wind_col]
+        if solar_col:
+            df["solar_radiation"] = df[solar_col].clip(lower=0)
+        legacy_cols = [c for c in ["temperature", "wind_speed", "solar_radiation"] if c in df.columns]
+    else:
+        df   = df[["temperature", "wind_speed", "solar_radiation"]]
+        df["solar_radiation"] = df["solar_radiation"].clip(lower=0)
+        legacy_cols = ["temperature", "wind_speed", "solar_radiation"]
+
+    df = _enforce_hourly(df)
+    _flag_large_gaps(df, legacy_cols)
+    df = _interpolate(df, legacy_cols)
     return _save(df, f"weather_{zone}.parquet")
 
 
@@ -205,8 +222,9 @@ def clean_fuel_prices() -> pd.DataFrame:
 
     daily = pd.date_range(raw.index.min(), raw.index.max(), freq="D")
     raw   = raw.reindex(daily)
-    raw["gas_price"]    = raw["gas_price"].ffill()
-    raw["carbon_price"] = raw["carbon_price"].ffill()
+    fuel_cols = [c for c in ["gas_price", "coal_price", "carbon_price"] if c in raw.columns]
+    for col in fuel_cols:
+        raw[col] = raw[col].ffill()
 
     hourly_idx = pd.date_range(
         raw.index.min().normalize(),
@@ -216,8 +234,8 @@ def clean_fuel_prices() -> pd.DataFrame:
     hourly = pd.DataFrame(index=hourly_idx)
     hourly.index.name = "timestamp"
     raw.index = raw.index.tz_localize("UTC")
-    hourly["gas_price"]    = raw["gas_price"].reindex(hourly_idx,    method="ffill")
-    hourly["carbon_price"] = raw["carbon_price"].reindex(hourly_idx, method="ffill")
+    for col in fuel_cols:
+        hourly[col] = raw[col].reindex(hourly_idx, method="ffill")
     return _save(hourly, "fuel_prices.parquet")
 
 

@@ -67,7 +67,29 @@ def run(skip_ingest: bool = False, skip_clean: bool = False, validate_only: bool
         log.info("STAGE 4 — Feature engineering")
         log.info("━" * 60)
         from features import engineer_features
-        engineer_features()
+        import pandas as pd
+        from config import DATA_RAW
+
+        def _load_csv(path):
+            return pd.read_csv(path) if path.exists() else None
+
+        weather_de  = _load_csv(DATA_RAW / "openmeteo" / "weather_DE-LU.csv")
+        weather_es  = _load_csv(DATA_RAW / "openmeteo" / "weather_ES.csv")
+        neighbor_df = _load_csv(DATA_RAW / "entsoe"    / "prices_neighbors.csv")
+        fuel_df     = _load_csv(DATA_RAW / "fuel"      / "fuel_prices.csv")
+        nuclear_df  = _load_csv(DATA_RAW / "entsoe"    / "nuclear_ES.csv")
+        ensemble_de = _load_csv(DATA_RAW / "openmeteo" / "ensemble_DE-LU.csv")
+        ensemble_es = _load_csv(DATA_RAW / "openmeteo" / "ensemble_ES.csv")
+
+        engineer_features(
+            weather_de=weather_de,
+            weather_es=weather_es,
+            neighbor_df=neighbor_df,
+            fuel_df=fuel_df,
+            nuclear_df=nuclear_df,
+            ensemble_de=ensemble_de,
+            ensemble_es=ensemble_es,
+        )
 
     log.info("━" * 60)
     log.info("STAGE 5 — Validation")

@@ -216,8 +216,8 @@ def _mondrian_bucket(ts: pd.Timestamp, cal) -> int:
 
 def train_zone(zdf: pd.DataFrame, zone: str) -> tuple[dict, dict]:
     """Train 3 quantile models for one zone. Return models + val predictions."""
-    train = zdf[zdf.index <  TRAIN_END]
-    val   = zdf[(zdf.index >= TRAIN_END) & (zdf.index < VAL_END)]
+    train = zdf[zdf.index <  TRAIN_END].dropna(subset=[TARGET])
+    val   = zdf[(zdf.index >= TRAIN_END) & (zdf.index < VAL_END)].dropna(subset=[TARGET])
 
     X_tr, y_tr = train[FEATURES], train[TARGET]
     X_va, y_va = val[FEATURES],   val[TARGET]
@@ -304,7 +304,7 @@ def calibrate_zone(
     _cal_start = cal_start or VAL_END
     _cal_end   = cal_end   or CAL_END
     cal = zdf[(zdf.index >= _cal_start) & (zdf.index < _cal_end)]
-    cal = cal.dropna(subset=FEATURES + [TARGET])
+    cal = cal.dropna(subset=[TARGET])  # LightGBM handles NaN features natively
 
     if len(cal) < 100:
         log.warning("  %s: calibration set too small (%d rows) — CQR skipped", zone, len(cal))
@@ -758,6 +758,13 @@ def build_eval_row(
         ramp = row["residual_load_ramp"]
     row["residual_load_ramp"] = np.clip(ramp, -2500, 5000)
 
+    # Keep _forecast columns in sync with their actuals counterparts.
+    # For eval slots the "forecast" is the same as the best estimate we just computed
+    # (either from ENTSOE gen_fcst or proxy), which is what market participants knew.
+    row["residual_load_forecast"]         = row["residual_load"]
+    row["renewable_penetration_forecast"] = row["renewable_penetration"]
+    row["residual_load_ramp_forecast"]    = row["residual_load_ramp"]
+
     # ── Weather features ──────────────────────────────────────────────────────
     # Original single-city columns (fallback)
     weather_cols = ["temperature", "wind_speed", "solar_radiation"]
@@ -1054,8 +1061,9 @@ def main(predict: bool = False, pred_start: str | None = None,
         "ES p975":    zone_preds["ES"]["p975"],
     })
 
-    # Final submission sanity checks
-    assert len(out) == 48,              f"Expected 48 rows, got {len(out)}"
+    # Sanity checks — row count only enforced for default eval window
+    if pred_start is None and pred_end is None:
+        assert len(out) == 48, f"Expected 48 rows, got {len(out)}"
     assert (out["DE-LU p025"] < out["DE-LU p50"]).all(),  "DE-LU p025 >= p50 violation"
     assert (out["DE-LU p50"]  < out["DE-LU p975"]).all(), "DE-LU p50 >= p975 violation"
     assert (out["ES p025"]    < out["ES p50"]).all(),      "ES p025 >= p50 violation"

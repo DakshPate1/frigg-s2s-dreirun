@@ -265,8 +265,10 @@ def add_weather_features(df: pd.DataFrame,
         zone_df = df.xs(zone, level="zone").copy()
         weather = weather_de if zone == "DE-LU" else weather_es
 
-        # Merge weather columns
-        zone_df = zone_df.join(weather, how="left")
+        # Join only columns not already present (alignment may have brought them in)
+        new_cols = [c for c in weather.columns if c not in zone_df.columns]
+        if new_cols:
+            zone_df = zone_df.join(weather[new_cols], how="left")
 
         # ── Wind speed (100m) aggregated ──────────────────────────────────────
         # Find aggregated wind column (output of weighted average in ingestion)
