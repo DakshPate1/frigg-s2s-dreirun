@@ -11,3 +11,4 @@ retry-requests>=2.0
 scipy>=1.10
 holidays>=0.50
 entsoe-py>=0.6
+shap>=0.44
