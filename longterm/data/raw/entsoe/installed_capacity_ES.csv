@@ -1,0 +1,119 @@
+year,psr_type,capacity_mw,zone
+2018,Biomass,519.9,ES
+2018,Fossil Gas,30682.9,ES
+2018,Fossil Hard coal,9534.7,ES
+2018,Fossil Oil,715.2,ES
+2018,Hydro Pumped Storage,5645.4,ES
+2018,Hydro Run-of-river and poundage,1156.2,ES
+2018,Hydro Water Reservoir,19125.0,ES
+2018,Nuclear,7117.2,ES
+2018,Other,117.4,ES
+2018,Other renewable,261.7,ES
+2018,Solar,6722.4,ES
+2018,Waste,544.1,ES
+2018,Wind Onshore,22834.1,ES
+2019,Biomass,507.0,ES
+2019,Fossil Gas,30266.3,ES
+2019,Fossil Hard coal,9560.7,ES
+2019,Fossil Oil,713.8,ES
+2019,Hydro Pumped Storage,5645.4,ES
+2019,Hydro Run-of-river and poundage,1156.2,ES
+2019,Hydro Water Reservoir,19145.8,ES
+2019,Nuclear,7117.2,ES
+2019,Other,117.4,ES
+2019,Other renewable,260.9,ES
+2019,Solar,6751.1,ES
+2019,Waste,537.6,ES
+2019,Wind Onshore,22960.6,ES
+2020,Biomass,554.6,ES
+2020,Fossil Gas,30012.3,ES
+2020,Fossil Hard coal,9213.9,ES
+2020,Fossil Oil,706.5,ES
+2020,Hydro Pumped Storage,5645.4,ES
+2020,Hydro Run-of-river and poundage,1154.8,ES
+2020,Hydro Water Reservoir,19139.4,ES
+2020,Nuclear,7117.2,ES
+2020,Other,117.4,ES
+2020,Other renewable,274.8,ES
+2020,Solar,8465.8,ES
+2020,Waste,543.1,ES
+2020,Wind Onshore,24446.6,ES
+2021,Biomass,704.0,ES
+2021,Fossil Gas,29969.5,ES
+2021,Fossil Hard coal,5977.0,ES
+2021,Fossil Oil,678.4,ES
+2021,Hydro Pumped Storage,5645.4,ES
+2021,Hydro Run-of-river and poundage,1154.8,ES
+2021,Hydro Water Reservoir,19185.7,ES
+2021,Nuclear,7117.2,ES
+2021,Other,117.4,ES
+2021,Other renewable,268.8,ES
+2021,Solar,11389.5,ES
+2021,Waste,537.1,ES
+2021,Wind Onshore,26663.6,ES
+2022,Biomass,702.3,ES
+2022,Fossil Gas,29926.9,ES
+2022,Fossil Hard coal,4641.8,ES
+2022,Fossil Oil,669.0,ES
+2022,Hydro Pumped Storage,5695.4,ES
+2022,Hydro Run-of-river and poundage,1154.8,ES
+2022,Hydro Water Reservoir,19186.7,ES
+2022,Nuclear,7117.2,ES
+2022,Other,118.4,ES
+2022,Other renewable,271.7,ES
+2022,Solar,14639.9,ES
+2022,Waste,565.3,ES
+2022,Wind Onshore,27734.8,ES
+2023,Biomass,707.1,ES
+2023,Fossil Gas,29902.6,ES
+2023,Fossil Hard coal,3222.6,ES
+2023,Fossil Oil,669.7,ES
+2023,Hydro Pumped Storage,3417.5,ES
+2023,Hydro Run-of-river and poundage,1154.8,ES
+2023,Hydro Water Reservoir,15772.7,ES
+2023,Nuclear,7117.2,ES
+2023,Other,118.4,ES
+2023,Other renewable,284.9,ES
+2023,Solar,18522.5,ES
+2023,Waste,545.9,ES
+2023,Wind Onshore,29320.4,ES
+2024,Biomass,707.5,ES
+2024,Fossil Gas,29872.8,ES
+2024,Fossil Hard coal,3222.6,ES
+2024,Fossil Oil,703.7,ES
+2024,Hydro Pumped Storage,3417.5,ES
+2024,Hydro Run-of-river and poundage,1154.8,ES
+2024,Hydro Water Reservoir,15771.4,ES
+2024,Nuclear,7117.2,ES
+2024,Other,122.2,ES
+2024,Other renewable,286.9,ES
+2024,Solar,23867.3,ES
+2024,Waste,545.9,ES
+2024,Wind Onshore,30159.3,ES
+2025,Biomass,709.1,ES
+2025,Fossil Gas,29943.3,ES
+2025,Fossil Hard coal,1819.7,ES
+2025,Fossil Oil,672.2,ES
+2025,Hydro Pumped Storage,3417.5,ES
+2025,Hydro Run-of-river and poundage,1154.2,ES
+2025,Hydro Water Reservoir,15764.6,ES
+2025,Nuclear,7117.2,ES
+2025,Other,129.6,ES
+2025,Other renewable,620.7,ES
+2025,Solar,29047.0,ES
+2025,Waste,545.9,ES
+2025,Wind Onshore,30931.9,ES
+2026,Biomass,753.4,ES
+2026,Energy storage,31.6,ES
+2026,Fossil Gas,29920.8,ES
+2026,Fossil Hard coal,1258.1,ES
+2026,Fossil Oil,726.2,ES
+2026,Hydro Pumped Storage,3417.5,ES
+2026,Hydro Run-of-river and poundage,2629.6,ES
+2026,Hydro Water Reservoir,14256.6,ES
+2026,Nuclear,7117.3,ES
+2026,Other,143.1,ES
+2026,Other renewable,787.5,ES
+2026,Solar,41433.4,ES
+2026,Waste,545.9,ES
+2026,Wind Onshore,32451.4,ES
