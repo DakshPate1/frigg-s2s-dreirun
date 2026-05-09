@@ -93,9 +93,9 @@ QUANTILES = [0.025, 0.45, 0.975]
 # Training window: 2023-05-01 → 2025-01-01  (post-crisis clean data)
 # Validation:      2025-01-01 → 2026-01-01  (full year 2025)
 # Calibration:     2026-01-01 → 2026-05-10  (Jan–May 2026, before eval window)
-# Eval window:     2026-05-11 02:00 CEST → 2026-05-12 01:00 CEST (48 slots)
-TRAIN_END = "2025-01-01"
-VAL_END   = "2026-01-01"
+# Eval window:     2026-05-11 02:00 CEST → 2026-05-12 01:00 CEST (24 slots, 00:00–23:00 UTC)
+TRAIN_END = "2025-10-01"   # train 2023-05 → 2025-09 (28 months incl. most of 2025)
+VAL_END   = "2026-01-01"  # val Q4 2025 (3 months) — early stopping + metrics
 CAL_END   = "2026-05-10"   # ← FIXED: was 2026-05-08, must stop before eval window
 
 # Horizon regime split: ≤ this many days → LightGBM; beyond → seasonal long-term model
@@ -175,19 +175,22 @@ def train_zone(zdf: pd.DataFrame, zone: str) -> tuple[dict, dict]:
     for q in QUANTILES:
         log.info("    fitting q=%.3f ...", q)
         m = lgb.LGBMRegressor(**{**LGB_BASE, "alpha": q})
-        m.fit(
-            X_tr, y_tr,
-            eval_set=[(X_va, y_va)],
-            callbacks=[
+        fit_kwargs = {}
+        if len(X_va) > 0:
+            fit_kwargs["eval_set"] = [(X_va, y_va)]
+            fit_kwargs["callbacks"] = [
                 lgb.early_stopping(100, verbose=False),
                 lgb.log_evaluation(0),
-            ],
-        )
+            ]
+        m.fit(X_tr, y_tr, **fit_kwargs)
         qmodels[q]   = m
-        val_preds[q] = m.predict(X_va)
-        log.info("      best_iter=%d  pinball=%.4f",
-                 m.best_iteration_,
-                 pinball(y_va.values, val_preds[q], q))
+        val_preds[q] = m.predict(X_va) if len(X_va) > 0 else np.array([])
+        if len(X_va) > 0:
+            log.info("      best_iter=%d  pinball=%.4f",
+                     m.best_iteration_,
+                     pinball(y_va.values, val_preds[q], q))
+        else:
+            log.info("      no val set — trained to n_estimators max")
 
     return qmodels, {"preds": val_preds, "actual": y_va, "X": X_va}
 
@@ -195,6 +198,9 @@ def train_zone(zdf: pd.DataFrame, zone: str) -> tuple[dict, dict]:
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
 def report_zone(zone: str, val: dict) -> None:
+    if len(val["actual"]) == 0:
+        log.info("  %s — no validation set (TRAIN_END == VAL_END); metrics from prior run", zone)
+        return
     y    = val["actual"].values
     p025 = val["preds"][0.025]
     p50  = val["preds"][0.45]
