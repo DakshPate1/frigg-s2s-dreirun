@@ -54,90 +54,35 @@ OUT_PATH  = ROOT / "alpine-arbitrage_predictions.csv"
 # New additions marked with # NEW.
 # model.py auto-filters to columns present in dataset — safe to add ahead of data.
 FEATURES = [
-    # ── Fundamental supply/demand drivers ────────────────────────────────────
-    "load", "wind_generation", "solar_generation", "hydro_generation",
-    "nuclear_generation",                                               # NEW — ES active nuclear
+    # ── Price history (dominant signals — recursive fill during inference) ─────
+    "lag_1",
+    "lag_24",
+    "lag_168",
+    "price_roll_24h",
+    "price_roll_168h",
+    "price_roll_std_168h",
 
-    # ── Original single-city weather (fallback if multi-city not present) ────
-    "temperature", "wind_speed", "solar_radiation",
+    # ── Grid state: ramp forecasts + realised ─────────────────────────────────
+    "residual_load_ramp_forecast",   # strongest non-lag signal both zones
+    "residual_load_ramp",
+    "residual_load_forecast",
+    "residual_load",
+    "renewable_penetration_forecast",
 
-    # ── Multi-city capacity/population-weighted weather ───────────────────────
-    # NEW — generation centers + demand centers separated (see config.py)
-    "wind_speed_agg",          # capacity-weighted wind at turbine locations
-    "wind_speed_cubed",        # cubic wind → power output proxy
-    "solar_radiation_agg",     # capacity-weighted solar at PV locations
-    "solar_hour_interaction",  # solar × sin(hour) → morning/evening asymmetry
-    "temperature_agg",         # population-weighted demand temperature
-    "temperature_sq",          # nonlinear heating/cooling demand
+    # ── Generation mix ────────────────────────────────────────────────────────
+    "hydro_generation",
+    "wind_generation",
+    "solar_generation",
+    "load",
 
-    # ── DE-LU specific: Nordic wind + Swiss alpine hydro ─────────────────────
-    # NEW — cross-border physical generation signals
-    "DK_wind_speed",           # Danish North Sea wind exports into north Germany
-    "DK_wind_speed_cubed",
-    "CH_precipitation",        # Alpine snowmelt → Swiss hydro availability
-    "CH_precip_7d_sum",        # 7-day rolling sum → reservoir filling lag
-
-    # ── ES specific: hydro reservoir proxy ───────────────────────────────────
-    # NEW
-    "ES_hydro_precipitation",
-    "ES_hydro_precip_7d_sum",
-    "nuclear_available_mw",    # REMIT unavailability-adjusted nuclear capacity
+    # ── Cross-border / inter-zone ─────────────────────────────────────────────
+    "net_imports",
+    "cross_zone_lag24",
+    "NL_price_lag24",   # DE-LU: gas-hub correlation
+    "CH_price_lag24",   # DE-LU: alpine hydro arbitrage
 
     # ── Fuel / carbon ─────────────────────────────────────────────────────────
-    "gas_price",
     "carbon_price",
-    "coal_price",              # NEW — API2 coal, relevant for DE-LU coal peakers
-
-    # ── Derived generation features ───────────────────────────────────────────
-    "residual_load",
-    "renewable_penetration",
-    "residual_load_ramp",
-    "residual_load_forecast",           # day-ahead forecast version
-    "renewable_penetration_forecast",
-    "residual_load_ramp_forecast",
-
-    # ── Cross-border flows ────────────────────────────────────────────────────
-    "net_imports",
-
-    # ── Neighbor zone prices (lagged 24h) ─────────────────────────────────────
-    # NEW — price transmission + transmission congestion signals
-    "FR_price_lag24",          # France: dominant flow partner both zones
-    "NL_price_lag24",          # Netherlands: gas hub, north wind correlation
-    "CH_price_lag24",          # Switzerland: alpine hydro arbitrage
-    "DK_price_lag24",          # Denmark: Nordic wind export signal
-    # Transmission spreads: large spread = interconnectors congested
-    "DE_LU_FR_spread",
-    "DE_LU_NL_spread",
-    "DE_LU_CH_spread",
-    "ES_FR_spread",
-
-    # ── Cross-zone price lag ──────────────────────────────────────────────────
-    # NEW — captures Iberian isolation vs Central European coupling
-    "cross_zone_lag24",
-
-    # ── Calendar (circular encoding) ──────────────────────────────────────────
-    "hour_sin", "hour_cos",
-    "weekday_sin", "weekday_cos",
-    "month_sin", "month_cos",
-    "week_sin", "week_cos",
-    "is_holiday",
-    "days_to_holiday",
-    "days_from_holiday",
-
-    # ── Regime flags ──────────────────────────────────────────────────────────
-    # NEW
-    "crisis_period",           # 1 = Aug 2021 – Dec 2022 energy crisis
-    "is_peak",                 # 1 = morning (7-9) or evening (17-20) peak hours
-    "negative_price_lag24",    # 1 = own-zone price was negative 24h ago
-
-    # ── Price history ─────────────────────────────────────────────────────────
-    "lag_1", "lag_24", "lag_168",
-    "price_roll_24h", "price_roll_168h", "price_roll_std_168h",  # std NEW
-
-    # ── Ensemble uncertainty ──────────────────────────────────────────────────
-    # NEW — ECMWF ensemble spread for dynamic interval calibration
-    "wind_ensemble_std",
-    "solar_ensemble_std",
 ]
 
 TARGET    = "price"
