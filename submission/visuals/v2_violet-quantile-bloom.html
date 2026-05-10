@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quantile Bloom v10</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #0a0810;
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+            width: 100vw; height: 100vh;
+        }
+
+        /* Full-bleed canvas */
+        #canvas-container {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #canvas-container canvas {
+            display: block;
+            max-width: 100vw;
+            max-height: 100vh;
+            width: auto !important;
+            height: auto !important;
+        }
+
+        /* ── FLOATING HUD — bottom-left ── */
+        #hud {
+            position: fixed;
+            bottom: 28px; left: 28px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 240px;
+        }
+
+        /* Collapsed state: only the toggle shows */
+        #hud.collapsed #panel { display: none; }
+
+        .hud-toggle {
+            align-self: flex-start;
+            background: rgba(10,8,16,0.75);
+            border: 1px solid rgba(168,85,247,0.3);
+            backdrop-filter: blur(12px);
+            color: rgba(200,180,255,0.7);
+            font-family: 'Inter', sans-serif;
+            font-size: 10px; font-weight: 500;
+            letter-spacing: 1.5px; text-transform: uppercase;
+            padding: 6px 12px; border-radius: 20px;
+            cursor: pointer; transition: all 0.2s;
+        }
+        .hud-toggle:hover {
+            border-color: rgba(168,85,247,0.7);
+            color: rgba(220,200,255,1);
+            background: rgba(168,85,247,0.12);
+        }
+
+        #panel {
+            background: rgba(10,8,16,0.82);
+            border: 1px solid rgba(168,85,247,0.18);
+            backdrop-filter: blur(20px);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex; flex-direction: column; gap: 14px;
+        }
+
+        .panel-title {
+            font-size: 11px; font-weight: 600;
+            color: rgba(220,200,255,0.9);
+            letter-spacing: 0.3px;
+        }
+        .panel-meta {
+            font-size: 10px; color: rgba(168,130,255,0.5);
+            margin-top: 2px; line-height: 1.5;
+        }
+
+        /* Seed row */
+        .seed-row {
+            display: flex; align-items: center; gap: 0;
+            border: 1px solid rgba(168,85,247,0.2);
+            border-radius: 6px; overflow: hidden;
+        }
+        .seed-num {
+            flex: 1; background: rgba(168,85,247,0.07);
+            border: none; color: rgba(190,160,255,1);
+            font-family: 'Inter', sans-serif;
+            font-size: 12px; font-weight: 600;
+            padding: 7px 10px; text-align: center; outline: none;
+        }
+        .seed-num:focus { background: rgba(168,85,247,0.14); }
+        .s-btn {
+            background: transparent; border: none;
+            border-left: 1px solid rgba(168,85,247,0.2);
+            color: rgba(168,85,247,0.5);
+            font-size: 13px; padding: 7px 9px; cursor: pointer;
+            transition: color 0.15s;
+        }
+        .s-btn:hover { color: rgba(168,85,247,1); }
+
+        .btn-strip { display: flex; gap: 5px; }
+        .hbtn {
+            flex: 1; background: transparent;
+            border: 1px solid rgba(168,85,247,0.2);
+            color: rgba(168,85,247,0.5);
+            font-family: 'Inter', sans-serif;
+            font-size: 9px; font-weight: 600;
+            letter-spacing: 1px; text-transform: uppercase;
+            padding: 6px 4px; border-radius: 4px;
+            cursor: pointer; transition: all 0.15s;
+        }
+        .hbtn:hover {
+            border-color: rgba(168,85,247,0.7);
+            color: rgba(190,160,255,1);
+            background: rgba(168,85,247,0.08);
+        }
+
+        /* Sliders */
+        .ctrl { display: flex; flex-direction: column; gap: 5px; }
+        .ctrl-hdr {
+            display: flex; justify-content: space-between;
+            font-size: 9px; letter-spacing: 0.8px; text-transform: uppercase;
+            color: rgba(168,130,255,0.5);
+        }
+        .ctrl-val { color: rgba(190,160,255,0.9); }
+        input[type="range"] {
+            width: 100%; height: 1px; -webkit-appearance: none;
+            background: rgba(168,85,247,0.2); outline: none; cursor: pointer;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 11px; height: 11px;
+            background: rgba(168,85,247,1); border-radius: 50%;
+            cursor: pointer; transition: transform 0.1s;
+            box-shadow: 0 0 8px rgba(168,85,247,0.6);
+        }
+        input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.3); }
+        input[type="range"]::-moz-range-thumb {
+            width: 11px; height: 11px; background: rgba(168,85,247,1);
+            border-radius: 50%; border: none;
+        }
+
+        /* Legend pills */
+        .leg { display: flex; flex-direction: column; gap: 5px; }
+        .leg-row {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 9px; color: rgba(168,130,255,0.5);
+            letter-spacing: 0.3px;
+        }
+        .leg-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+        .leg-key { min-width: 46px; font-weight: 600; }
+
+        /* ── FLOATING INFO — top-right ── */
+        #info {
+            position: fixed;
+            top: 24px; right: 28px;
+            z-index: 10;
+            text-align: right;
+        }
+        .info-title {
+            font-size: 22px; font-weight: 700; letter-spacing: -0.5px;
+            color: rgba(220,200,255,0.92); line-height: 1.1;
+        }
+        .info-sub {
+            font-size: 11px; color: rgba(168,85,247,0.55);
+            margin-top: 4px; letter-spacing: 0.3px;
+        }
+
+        /* ── TOOLTIP ── */
+        #tip {
+            display: none; position: fixed; pointer-events: none; z-index: 999;
+            background: rgba(10,8,16,0.92);
+            border: 1px solid rgba(168,85,247,0.35);
+            padding: 10px 14px; border-radius: 8px;
+            font-family: 'Inter', sans-serif; font-size: 11px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.6), 0 0 20px rgba(168,85,247,0.1);
+            white-space: nowrap; line-height: 1.6;
+            backdrop-filter: blur(8px);
+        }
+        #tip .t-zone { font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; color: rgba(168,85,247,0.5); display: block; margin-bottom: 1px; }
+        #tip .t-hour { font-size: 14px; font-weight: 700; color: rgba(220,200,255,0.95); display: block; margin-bottom: 5px; letter-spacing: -0.3px; }
+        #tip .t-row  { display: flex; align-items: baseline; gap: 8px; }
+        #tip .t-q    { font-size: 9px; color: rgba(168,85,247,0.5); min-width: 56px; }
+        #tip .t-price { font-size: 16px; font-weight: 700; }
+        #tip .t-unit { font-size: 9px; color: rgba(168,85,247,0.4); }
+        #tip .t-note { font-size: 9px; color: rgba(168,85,247,0.4); display: block; margin-top: 3px; letter-spacing: 0.5px; }
+        #tip .q025   { color: #67e8f9; }  /* cyan   */
+        #tip .q45    { color: #e2e8f0; }  /* white  */
+        #tip .q975   { color: #fbbf24; }  /* amber  */
+    </style>
+</head>
+<body>
+
+<!-- FULL-BLEED CANVAS -->
+<div id="canvas-container"></div>
+
+<!-- TOP-RIGHT TITLE -->
+<div id="info">
+    <div class="info-title">Quantile<br>Bloom</div>
+    <div class="info-sub">Alpine Arbitrage · DE-LU &amp; ES<br>11 May 2026 · 24h day-ahead</div>
+</div>
+
+<!-- BOTTOM-LEFT HUD -->
+<div id="hud">
+    <div id="panel">
+        <div>
+            <div class="panel-title">Controls</div>
+            <div class="panel-meta">Violet = DE-LU &nbsp;·&nbsp; Coral = ES<br>↻ clockwise 00:00→23:00 UTC</div>
+        </div>
+
+        <!-- Seed -->
+        <div class="seed-row">
+            <input type="number" id="seed-input" class="seed-num" value="12345" onchange="updateSeed()">
+            <button class="s-btn" onclick="previousSeed()">&#8592;</button>
+            <button class="s-btn" onclick="nextSeed()">&#8594;</button>
+        </div>
+        <div class="btn-strip">
+            <button class="hbtn" onclick="randomSeedAndUpdate()">&#8635; rnd</button>
+            <button class="hbtn" onclick="resetParameters()">reset</button>
+            <button class="hbtn" onclick="downloadArt()">save</button>
+        </div>
+
+        <!-- Sliders -->
+        <div class="ctrl">
+            <div class="ctrl-hdr"><span>Sharpness</span><span class="ctrl-val" id="petalSharpness-value">0.52</span></div>
+            <input type="range" id="petalSharpness" min="0.1" max="0.85" step="0.05" value="0.52"
+                   oninput="updateStyle('petalSharpness', parseFloat(this.value))">
+        </div>
+        <div class="ctrl">
+            <div class="ctrl-hdr"><span>Detail</span><span class="ctrl-val" id="detailLines-value">4</span></div>
+            <input type="range" id="detailLines" min="1" max="8" step="1" value="4"
+                   oninput="updateStyle('detailLines', parseInt(this.value))">
+        </div>
+        <div class="ctrl">
+            <div class="ctrl-hdr"><span>Noise</span><span class="ctrl-val" id="noiseAmount-value">0.10</span></div>
+            <input type="range" id="noiseAmount" min="0" max="0.4" step="0.05" value="0.10"
+                   oninput="updateStyle('noiseAmount', parseFloat(this.value))">
+        </div>
+        <div class="ctrl">
+            <div class="ctrl-hdr"><span>Spread</span><span class="ctrl-val" id="outerSpread-value">1.05</span></div>
+            <input type="range" id="outerSpread" min="0.7" max="1.35" step="0.05" value="1.05"
+                   oninput="updateStyle('outerSpread', parseFloat(this.value))">
+        </div>
+        <div class="ctrl">
+            <div class="ctrl-hdr"><span>Glow</span><span class="ctrl-val" id="glowAmt-value">0.75</span></div>
+            <input type="range" id="glowAmt" min="0.1" max="1.4" step="0.05" value="0.75"
+                   oninput="updateStyle('glowAmt', parseFloat(this.value))">
+        </div>
+
+        <!-- Legend -->
+        <div class="leg">
+            <div class="leg-row"><div class="leg-dot" style="background:#a855f7"></div><span class="leg-key" style="color:rgba(200,160,255,0.8)">DE-LU</span><span>fans left</span></div>
+            <div class="leg-row"><div class="leg-dot" style="background:#f97316"></div><span class="leg-key" style="color:rgba(255,190,130,0.8)">ES</span><span>fans right</span></div>
+            <div class="leg-row"><div class="leg-dot" style="background:#67e8f9;opacity:0.7"></div><span class="leg-key" style="color:#67e8f9">inner</span><span>q=0.025</span></div>
+            <div class="leg-row"><div class="leg-dot" style="background:#e2e8f0;opacity:0.7"></div><span class="leg-key" style="color:#e2e8f0">middle</span><span>q=0.45 ✶</span></div>
+            <div class="leg-row"><div class="leg-dot" style="background:#fbbf24;opacity:0.7"></div><span class="leg-key" style="color:#fbbf24">outer</span><span>q=0.975</span></div>
+        </div>
+    </div>
+
+    <button class="hud-toggle" onclick="toggleHUD()">&#9776; Controls</button>
+</div>
+
+<div id="tip"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// GEOMETRY
+// ═══════════════════════════════════════════════════════
+var CX = 600, CY = 600;
+var R_CORE = 38;
+var R_Q025 = 178;
+var R_Q45  = 340;
+var R_Q975 = 504;
+
+// ═══════════════════════════════════════════════════════
+// DATA
+// ═══════════════════════════════════════════════════════
+var PRED_DELU = {
+    p025: [74.496,73.535,74.500,80.186,85.201,92.818,85.788,72.832,
+           63.515,49.193,42.643,43.934,47.915,54.273,66.527,74.364,
+           84.910,94.620,107.339,101.503,86.026,80.765,75.866,73.537],
+    p50:  [82.679,80.684,80.110,89.151,112.382,125.319,108.752,93.511,
+           82.048,73.982,66.634,64.957,65.870,69.630,79.414,90.476,
+           109.278,140.603,145.395,113.111,100.215,90.867,84.699,82.413],
+    p975: [92.903,92.516,96.628,109.149,151.533,168.064,135.522,110.486,
+           97.104,86.753,82.579,76.773,77.356,80.195,92.355,108.417,
+           142.321,182.548,185.653,165.387,127.461,111.918,103.079,100.289]
+};
+var PRED_ES = {
+    p025: [37.009,37.837,39.281,41.292,41.169,48.666,35.389,18.568,
+            9.604, 2.255, 2.467, 7.480, 2.729,-1.019, 0.024,-1.525,
+           -0.789, 9.083,28.760,46.073,39.102,31.529,27.090,22.701],
+    p50:  [56.167,57.861,57.246,55.903,66.605,75.989,58.074,52.951,
+           40.254,32.520,25.750,24.399,18.788,12.451, 7.330, 6.249,
+           17.715,38.162,61.234,78.213,67.436,53.482,47.489,43.058],
+    p975: [65.104,64.689,65.240,73.397,90.261,104.840,87.349,60.405,
+           54.687,42.664,36.795,38.272,36.927,32.314,29.419,30.115,
+           37.054,63.967,87.398,100.353,94.716,85.080,69.906,60.828]
+};
+var PRED_MIN = -1.5245;
+var PRED_MAX = 185.6526;
+
+// ═══════════════════════════════════════════════════════
+// PARAMS
+// ═══════════════════════════════════════════════════════
+var params = {
+    seed:           12345,
+    petalSharpness: 0.52,
+    detailLines:    4,
+    noiseAmount:    0.10,
+    outerSpread:    1.05,
+    glowAmt:        0.75
+};
+var defaultParams = Object.assign({}, params);
+var petalMods = [];
+
+// ═══════════════════════════════════════════════════════
+// PALETTE — violet/purple for DE-LU, coral/orange for ES
+// Quantile curve tier colors: cyan / white / amber
+// ═══════════════════════════════════════════════════════
+var PAL = {
+    delu: {
+        fill:    [120,  50, 200],   // deep violet
+        outline: [168,  85, 247],   // #a855f7
+        detail:  [196, 140, 255],
+        light:   [220, 190, 255],
+        accent:  [ 80,  25, 160],
+        glow:    [168,  85, 247]
+    },
+    es: {
+        fill:    [200,  80,  25],   // deep coral
+        outline: [249, 115,  22],   // #f97316
+        detail:  [255, 165,  80],
+        light:   [255, 210, 150],
+        accent:  [160,  50,  10],
+        glow:    [249, 115,  22]
+    }
+};
+function C(zone, key) { return zone === 0 ? PAL.delu[key] : PAL.es[key]; }
+
+// Tier colors for price curves: cyan / near-white / amber
+var TIER_RGB = [
+    [103, 232, 249],   // q025 cyan  #67e8f9
+    [226, 232, 240],   // q45  white #e2e8f0
+    [251, 191,  36]    // q975 amber #fbbf24
+];
+
+// ═══════════════════════════════════════════════════════
+// GEOMETRY HELPERS
+// ═══════════════════════════════════════════════════════
+var SCALE_MIN   = 0.30;
+var SCALE_RANGE = 0.70;
+var ZONE_FAN    = 3.8;
+
+function getPredVal(h, zone, tier) {
+    var data = zone === 0 ? PRED_DELU : PRED_ES;
+    return tier === 0 ? data.p025[h] : tier === 1 ? data.p50[h] : data.p975[h];
+}
+function getPredNorm(h, zone, tier) {
+    return Math.max(0, (getPredVal(h, zone, tier) - PRED_MIN) / (PRED_MAX - PRED_MIN));
+}
+function getR(h, zone, tier) {
+    var norm = getPredNorm(h, zone, tier);
+    var sc = SCALE_MIN + norm * SCALE_RANGE;
+    var nm = petalMods[h * 2 + zone] || { len: 1, wid: 1 };
+    sc += (nm.len - 1) * params.noiseAmount;
+    if (tier === 0) return R_Q025 * sc;
+    if (tier === 1) return R_Q45  * sc;
+    return R_Q975 * sc * params.outerSpread;
+}
+function hourAngle(h, zone) {
+    var base = (h / 24) * TWO_PI - HALF_PI;
+    return base + (zone === 0 ? -radians(ZONE_FAN) : +radians(ZONE_FAN));
+}
+function hourAngleMid(h) { return (h / 24) * TWO_PI - HALF_PI; }
+
+function computePetalMods() {
+    petalMods = [];
+    for (var h = 0; h < 24; h++) for (var z = 0; z < 2; z++) {
+        petalMods.push({
+            len: 1 + (noise(h*0.38+z*17.31+0.1, params.seed*0.001+1.7) - 0.5) * 0.6,
+            wid: 1 + (noise(h*0.38+z*17.31+77,  params.seed*0.001+3.2) - 0.5) * 0.4
+        });
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+// PETAL PATH
+// ═══════════════════════════════════════════════════════
+function petalPath(r1, r2, wf, s) {
+    s = (s !== undefined) ? s : params.petalSharpness;
+    var cw = wf*(1-s*0.38), c1y=-(r1+(r2-r1)*0.33), c2y=-(r2-(r2-r1)*0.13*(1-s));
+    beginShape();
+    vertex(0,-r1);
+    bezierVertex( cw*r1*0.90,c1y,  cw*r2*0.52,c2y, 0,-r2);
+    bezierVertex(-cw*r2*0.52,c2y, -cw*r1*0.90,c1y, 0,-r1);
+    endShape(CLOSE);
+}
+
+// ═══════════════════════════════════════════════════════
+// GLOW HELPER
+// ═══════════════════════════════════════════════════════
+function drawGlowPetal(r1, r2, wf, gc, alpha) {
+    var g = params.glowAmt;
+    fill(gc[0],gc[1],gc[2],alpha*g); noStroke();
+    petalPath(r1,r2,wf*2.2);
+    fill(gc[0],gc[1],gc[2],alpha*g*0.4);
+    petalPath(r1,r2,wf*3.8);
+}
+
+// ═══════════════════════════════════════════════════════
+// BACKGROUND — deep purple-navy, radial glow at center
+// ═══════════════════════════════════════════════════════
+function drawBackground() {
+    var ctx = drawingContext;
+
+    // Deep space gradient
+    var g = ctx.createRadialGradient(CX,CY,0,CX,CY,700);
+    g.addColorStop(0,   '#120e1e');
+    g.addColorStop(0.4, '#0d0a18');
+    g.addColorStop(1,   '#070510');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,1200,1200);
+
+    // Purple nebula bloom behind the flower
+    var nb = ctx.createRadialGradient(CX,CY,0,CX,CY,380);
+    nb.addColorStop(0,   'rgba(168,85,247,0.07)');
+    nb.addColorStop(0.5, 'rgba(168,85,247,0.02)');
+    nb.addColorStop(1,   'rgba(168,85,247,0)');
+    ctx.fillStyle = nb;
+    ctx.beginPath(); ctx.arc(CX,CY,380,0,Math.PI*2); ctx.fill();
+
+    // Star field — seeded, outside bloom radius
+    randomSeed(params.seed + 77);
+    noStroke();
+    var starLayers = [
+        {n:260,rMin:0.5,rMax:1.1,aMin:30, aMax:80 },
+        {n: 90,rMin:1.1,rMax:2.0,aMin:60, aMax:130},
+        {n: 28,rMin:1.8,rMax:3.2,aMin:110,aMax:190},
+        {n:  8,rMin:3.0,rMax:5.0,aMin:160,aMax:240}
+    ];
+    for (var li = 0; li < starLayers.length; li++) {
+        var sl = starLayers[li];
+        for (var i = 0; i < sl.n; i++) {
+            var sx = random(1200), sy = random(1200);
+            var ddx = sx-CX, ddy = sy-CY;
+            if (ddx*ddx+ddy*ddy < 540*540) continue;
+            var sr  = random(sl.rMin, sl.rMax);
+            var sa  = random(sl.aMin, sl.aMax);
+            // Slightly violet-tinted stars
+            fill(210+random(-20,20), 190+random(-20,20), 255, sa);
+            circle(sx, sy, sr*2);
+        }
+    }
+    // A few warm coral stars near ES side
+    for (var i = 0; i < 18; i++) {
+        var sx = random(1200), sy = random(1200);
+        var ddx = sx-CX, ddy = sy-CY;
+        if (ddx*ddx+ddy*ddy < 540*540) continue;
+        fill(255, 180, 120, random(70,170));
+        circle(sx, sy, random(0.8,2.2)*2);
+    }
+
+    // Faint concentric grid rings — violet tint
+    push(); translate(CX,CY); noFill();
+    for (var r = 40; r <= R_Q975+80; r += 40) {
+        stroke(168,85,247, r%160===0 ? 10 : 4);
+        strokeWeight(0.35);
+        circle(0,0,r*2);
+    }
+    pop();
+}
+
+// ═══════════════════════════════════════════════════════
+// SECTOR LINES
+// ═══════════════════════════════════════════════════════
+function drawSectorLines() {
+    push(); translate(CX,CY);
+    for (var h=0;h<24;h++) {
+        var ang=hourAngleMid(h), main=h%6===0;
+        stroke(168,85,247,main?18:6);
+        strokeWeight(main?0.7:0.3);
+        line(cos(ang)*(R_CORE+2), sin(ang)*(R_CORE+2),
+             cos(ang)*(R_Q975*params.outerSpread+30),
+             sin(ang)*(R_Q975*params.outerSpread+30));
+    }
+    pop();
+}
+
+// ═══════════════════════════════════════════════════════
+// OUTER PETALS — q=0.975
+// ═══════════════════════════════════════════════════════
+function drawOuterPetalHour(h, zone) {
+    push(); translate(CX,CY); rotate(hourAngle(h,zone));
+    var r1=getR(h,zone,1), r2=getR(h,zone,2);
+    var price=getPredNorm(h,zone,2);
+    var wf=(0.28+price*0.05)*(petalMods[h*2+zone].wid*0.5+0.5);
+    var gc=C(zone,'glow'), lc=C(zone,'light'), oc=C(zone,'outline');
+
+    drawGlowPetal(r1,r2,wf,gc,16);
+
+    fill(lc[0],lc[1],lc[2],18); noStroke();
+    petalPath(r1,r2,wf);
+
+    noFill();
+    for (var d=1;d<=4;d++) {
+        var t=d/5;
+        stroke(oc[0],oc[1],oc[2],lerp(52,8,t));
+        strokeWeight(0.55);
+        petalPath(r1,lerp(r1,r2,t),wf*lerp(0.90,0.26,t));
+    }
+
+    var isCard=h%6===0;
+    fill(oc[0],oc[1],oc[2],isCard?160:80); noStroke();
+    push(); translate(0,-r2);
+    if (isCard) { rotate(QUARTER_PI); rect(-4,-4,8,8); }
+    else        { circle(0,0,3.5); }
+    pop();
+
+    if (isCard) {
+        fill(oc[0],oc[1],oc[2],60); push(); translate(0,-r2); circle(0,0,14); pop();
+        fill(oc[0],oc[1],oc[2],200); push(); translate(0,-r2); circle(0,0,4); pop();
+    }
+    pop();
+}
+
+// ═══════════════════════════════════════════════════════
+// MIDDLE PETALS — q=0.45
+// ═══════════════════════════════════════════════════════
+function drawMiddlePetalHour(h, zone) {
+    push(); translate(CX,CY); rotate(hourAngle(h,zone));
+    var r1=getR(h,zone,0), r2=getR(h,zone,1);
+    var price=getPredNorm(h,zone,1);
+    var wf=(0.24+price*0.04)*(petalMods[h*2+zone].wid*0.4+0.6);
+    var gc=C(zone,'glow'), fc=C(zone,'fill'), oc=C(zone,'outline'), dc=C(zone,'detail'), lc=C(zone,'light');
+
+    drawGlowPetal(r1,r2,wf,gc,30);
+
+    fill(fc[0],fc[1],fc[2],120+price*40); noStroke();
+    petalPath(r1,r2,wf);
+
+    fill(lc[0],lc[1],lc[2],35); petalPath(r1,r2,wf*0.40);
+
+    noFill();
+    var nd=params.detailLines;
+    for (var d=1;d<=nd;d++) {
+        var t=d/(nd+1);
+        stroke(oc[0],oc[1],oc[2],lerp(160,18,t));
+        strokeWeight(lerp(0.80,0.28,t));
+        petalPath(r1,lerp(r1,r2,t+0.08),wf*lerp(0.84,0.16,t));
+    }
+
+    stroke(dc[0],dc[1],dc[2],55); strokeWeight(0.38);
+    for (var d=1;d<=4;d++) {
+        var t=d/5, ry=-lerp(r1,r2,t), hw=wf*lerp(r1,r2,t)*(1-t*0.40);
+        line(-hw,ry,hw,ry);
+    }
+
+    stroke(oc[0],oc[1],oc[2],220); strokeWeight(0.9);
+    line(0,-r1,0,-r2);
+    fill(dc[0],dc[1],dc[2],220); noStroke();
+    for (var d=1;d<=5;d++) circle(0,-lerp(r1,r2,d/6),2.5);
+
+    // Tip glow + oval
+    fill(oc[0],oc[1],oc[2],55); push(); translate(0,-r2); ellipse(0,0,12,18); pop();
+    fill(oc[0],oc[1],oc[2],200); push(); translate(0,-r2); ellipse(0,0,5,8); pop();
+    pop();
+}
+
+// ═══════════════════════════════════════════════════════
+// INNER PETALS — q=0.025
+// ═══════════════════════════════════════════════════════
+function drawInnerPetalHour(h, zone) {
+    push(); translate(CX,CY); rotate(hourAngle(h,zone));
+    var r1=R_CORE, r2=getR(h,zone,0);
+    var price=getPredNorm(h,zone,0);
+    var wf=(0.15+price*0.03)*(petalMods[h*2+zone].wid*0.35+0.65);
+    var sharp=0.70;
+    var gc=C(zone,'glow'), fc=C(zone,'fill'), dc=C(zone,'detail'), ac=C(zone,'accent');
+
+    drawGlowPetal(r1,r2,wf,gc,45);
+
+    fill(fc[0],fc[1],fc[2],200+price*35); noStroke();
+    petalPath(r1,r2,wf,sharp);
+
+    noFill(); stroke(gc[0],gc[1],gc[2],100); strokeWeight(0.9);
+    petalPath(r1,r2,wf*0.62,sharp);
+
+    stroke(dc[0],dc[1],dc[2],240); strokeWeight(1.0);
+    line(0,-r1,0,-r2);
+    fill(dc[0],dc[1],dc[2],240); noStroke();
+    for (var d=1;d<=3;d++) circle(0,-lerp(r1,r2,d/4),2.3);
+
+    // Tip
+    fill(gc[0],gc[1],gc[2],55); push(); translate(0,-r2); circle(0,0,13); pop();
+    fill(dc[0],dc[1],dc[2],255);
+    push(); translate(0,-r2); rotate(QUARTER_PI);
+    var ds=h%6===0?7:5; rect(-ds/2,-ds/2,ds,ds); pop();
+
+    fill(ac[0],ac[1],ac[2],155); circle(0,-r1,3.5);
+    pop();
+}
+
+// ═══════════════════════════════════════════════════════
+// PRICE CURVES — tier-colored (cyan/white/amber)
+// ═══════════════════════════════════════════════════════
+function drawPriceCurves() {
+    push(); translate(CX,CY); noFill();
+    var tierW=[0.85,1.5,0.85], tierA=[80,110,80];
+
+    for (var tier=0;tier<3;tier++) {
+        var rgb=TIER_RGB[tier];
+        for (var zone=0;zone<2;zone++) {
+            // Glow pass
+            stroke(rgb[0],rgb[1],rgb[2],tierA[tier]*0.22*params.glowAmt);
+            strokeWeight(tierW[tier]*5);
+            beginShape();
+            for (var w=-2;w<=26;w++) {
+                var hh=((w%24)+24)%24;
+                var ang=hourAngle(hh,zone), r=getR(hh,zone,tier);
+                curveVertex(cos(ang)*r,sin(ang)*r);
+            }
+            endShape();
+
+            // Crisp line
+            stroke(rgb[0],rgb[1],rgb[2],tierA[tier]);
+            strokeWeight(tierW[tier]);
+            beginShape();
+            for (var w=-2;w<=26;w++) {
+                var hh=((w%24)+24)%24;
+                var ang=hourAngle(hh,zone), r=getR(hh,zone,tier);
+                curveVertex(cos(ang)*r,sin(ang)*r);
+            }
+            endShape();
+        }
+    }
+
+    // Tick marks — colored by tier
+    for (var h=0;h<24;h++) {
+        var isMain=h%6===0, tlen=isMain?8:4, tw=isMain?1.0:0.5;
+        for (var zone=0;zone<2;zone++) for (var tier=0;tier<3;tier++) {
+            var ang=hourAngle(h,zone), r=getR(h,zone,tier), rgb=TIER_RGB[tier];
+            stroke(rgb[0],rgb[1],rgb[2],isMain?150:60); strokeWeight(tw);
+            line(cos(ang)*(r-tlen),sin(ang)*(r-tlen),cos(ang)*(r+3),sin(ang)*(r+3));
+        }
+    }
+
+    // Mid-hour markers — small violet diamonds
+    noStroke();
+    for (var h=0;h<24;h++) {
+        var midAng=hourAngleMid(h);
+        var rMid=(getR(h,0,1)+getR(h,1,1))/2;
+        fill(168,85,247,65);
+        push();
+        translate(cos(midAng)*rMid,sin(midAng)*rMid);
+        rotate(midAng+QUARTER_PI);
+        rect(-3,-3,6,6);
+        pop();
+    }
+    pop();
+}
+
+// ═══════════════════════════════════════════════════════
+// CENTER — pure glow point, no disc
+// ═══════════════════════════════════════════════════════
+function drawCenter() {
+    push(); translate(CX,CY);
+    var ctx=drawingContext;
+
+    // Ambient violet pulse
+    var gg=ctx.createRadialGradient(0,0,0,0,0,R_CORE*1.3);
+    gg.addColorStop(0,   'rgba(168,85,247,' +(0.18*params.glowAmt)+')');
+    gg.addColorStop(0.55,'rgba(168,85,247,' +(0.05*params.glowAmt)+')');
+    gg.addColorStop(1,   'rgba(168,85,247,0)');
+    ctx.fillStyle=gg; ctx.beginPath(); ctx.arc(0,0,R_CORE*1.3,0,Math.PI*2); ctx.fill();
+
+    // No solid black disc — petals converge at a bare glow point
+
+    // Tiny violet ring — just an anchor
+    noFill(); stroke(168,85,247,50); strokeWeight(0.7); circle(0,0,14);
+
+    // White center star
+    fill(240,230,255,230); noStroke(); circle(0,0,7);
+
+    // Glow on the dot
+    var cg=ctx.createRadialGradient(0,0,0,0,0,6);
+    cg.addColorStop(0,'rgba(255,255,255,0.95)');
+    cg.addColorStop(0.5,'rgba(200,160,255,0.6)');
+    cg.addColorStop(1,'rgba(168,85,247,0)');
+    ctx.fillStyle=cg; ctx.beginPath(); ctx.arc(0,0,6,0,Math.PI*2); ctx.fill();
+    pop();
+}
+
+// ═══════════════════════════════════════════════════════
+// LABELS
+// ═══════════════════════════════════════════════════════
+function drawLabels() {
+    push(); translate(CX,CY); noStroke();
+    textFont('Inter, sans-serif');
+
+    // Cardinal hours
+    var cardinals=[[0,'00:00'],[6,'06:00'],[12,'12:00'],[18,'18:00']];
+    textAlign(CENTER,CENTER);
+    for (var ci=0;ci<cardinals.length;ci++) {
+        var h=cardinals[ci][0], lab=cardinals[ci][1];
+        var ang=hourAngleMid(h);
+        var rLabel=Math.max(getR(h,0,2),getR(h,1,2))+52;
+        // Glow shadow
+        fill(168,85,247,20); textSize(22);
+        text(lab,cos(ang)*rLabel,sin(ang)*rLabel);
+        fill(220,200,255,200); textSize(16);
+        text(lab,cos(ang)*rLabel,sin(ang)*rLabel);
+    }
+
+    // Clockwise note
+    fill(168,85,247,60); textSize(12);
+    var bottomR=Math.max(getR(12,0,2),getR(12,1,2))+88;
+    text('↻ clockwise from midnight',0,bottomR);
+
+    // Quantile tier labels — cyan/white/amber
+    var labelAng=hourAngle(8,0)+radians(2);
+    textAlign(LEFT,CENTER); textSize(12);
+    var qL=[
+        {tier:0,label:'q=0.025', rgb:TIER_RGB[0]},
+        {tier:1,label:'q=0.45 ✶',rgb:TIER_RGB[1]},
+        {tier:2,label:'q=0.975', rgb:TIER_RGB[2]}
+    ];
+    for (var qi=0;qi<qL.length;qi++) {
+        var cfg=qL[qi], rAvg=getR(8,0,cfg.tier)+15;
+        var lx=cos(labelAng)*rAvg, ly=sin(labelAng)*rAvg;
+        // Glow
+        fill(cfg.rgb[0],cfg.rgb[1],cfg.rgb[2],22); textSize(18);
+        text(cfg.label,lx,ly);
+        fill(cfg.rgb[0],cfg.rgb[1],cfg.rgb[2],200); textSize(12);
+        text(cfg.label,lx,ly);
+    }
+    pop();
+}
+
+// ═══════════════════════════════════════════════════════
+// DRAW
+// ═══════════════════════════════════════════════════════
+function drawMandala() {
+    randomSeed(params.seed); noiseSeed(params.seed);
+    computePetalMods();
+    background(10,8,16);
+    drawBackground();
+    drawSectorLines();
+    for (var h=0;h<24;h++) { drawOuterPetalHour(h,0); drawOuterPetalHour(h,1); }
+    for (var h=0;h<24;h++) { drawMiddlePetalHour(h,0); drawMiddlePetalHour(h,1); }
+    for (var h=0;h<24;h++) { drawInnerPetalHour(h,0); drawInnerPetalHour(h,1); }
+    drawPriceCurves();
+    drawCenter();
+    drawLabels();
+}
+
+// ═══════════════════════════════════════════════════════
+// P5 SETUP — canvas fills viewport, square aspect ratio
+// ═══════════════════════════════════════════════════════
+function setup() {
+    var sz = Math.min(windowWidth, windowHeight);
+    var cvs = createCanvas(1200, 1200);
+    cvs.parent('canvas-container');
+    noLoop();
+    drawMandala();
+}
+function draw() {}
+function windowResized() { /* canvas scales via CSS */ }
+
+// ═══════════════════════════════════════════════════════
+// UI
+// ═══════════════════════════════════════════════════════
+var FMT={petalSharpness:2,detailLines:0,noiseAmount:2,outerSpread:2,glowAmt:2};
+function fmtVal(n,v){var d=FMT[n]!==undefined?FMT[n]:2;return d===0?String(Math.round(v)):v.toFixed(d);}
+function updateStyle(name,value){
+    params[name]=value;
+    document.getElementById(name+'-value').textContent=fmtVal(name,value);
+    drawMandala();
+}
+function updateSeedDisplay(){document.getElementById('seed-input').value=params.seed;}
+function updateSeed(){
+    var v=parseInt(document.getElementById('seed-input').value);
+    if(v&&v>0){params.seed=v;drawMandala();}else updateSeedDisplay();
+}
+function previousSeed(){params.seed=Math.max(1,params.seed-1);updateSeedDisplay();drawMandala();}
+function nextSeed(){params.seed++;updateSeedDisplay();drawMandala();}
+function randomSeedAndUpdate(){params.seed=Math.floor(Math.random()*999999)+1;updateSeedDisplay();drawMandala();}
+function resetParameters(){
+    params=Object.assign({},defaultParams);
+    [['petalSharpness',2],['detailLines',0],['noiseAmount',2],['outerSpread',2],['glowAmt',2]].forEach(function(p){
+        document.getElementById(p[0]).value=params[p[0]];
+        document.getElementById(p[0]+'-value').textContent=p[1]===0?String(params[p[0]]):params[p[0]].toFixed(p[1]);
+    });
+    updateSeedDisplay();drawMandala();
+}
+function downloadArt(){saveCanvas('quantile-bloom-v10-seed-'+params.seed,'png');}
+function toggleHUD(){
+    var hud=document.getElementById('hud');
+    hud.classList.toggle('collapsed');
+}
+window.addEventListener('load',updateSeedDisplay);
+
+// ═══════════════════════════════════════════════════════
+// HOVER TOOLTIP
+// ═══════════════════════════════════════════════════════
+function mouseMoved(){
+    var dx=mouseX-CX, dy=mouseY-CY, d=sqrt(dx*dx+dy*dy);
+    if(d<R_CORE*0.8||d>R_Q975*params.outerSpread*1.06){hideTip();return;}
+
+    var mouseAng=((atan2(dy,dx)+TWO_PI)%TWO_PI);
+    var bestH=0,bestZone=0,bestDiff=Infinity;
+    for(var h=0;h<24;h++) for(var zone=0;zone<2;zone++){
+        var pa=((hourAngle(h,zone)%TWO_PI)+TWO_PI)%TWO_PI;
+        var diff=abs(mouseAng-pa);
+        if(diff>PI)diff=TWO_PI-diff;
+        if(diff<bestDiff){bestDiff=diff;bestH=h;bestZone=zone;}
+    }
+    if(bestDiff>radians(6.5)){hideTip();return;}
+
+    var r0=getR(bestH,bestZone,0),r1=getR(bestH,bestZone,1),r2=getR(bestH,bestZone,2);
+    if(d>r2*1.04){hideTip();return;}
+
+    var diffs=[abs(d-r0),abs(d-r1),abs(d-r2)];
+    var tier=diffs.indexOf(Math.min.apply(null,diffs));
+    var data=bestZone===0?PRED_DELU:PRED_ES;
+    var zoneName=bestZone===0?'DE-LU':'ES';
+    var hStr=String(bestH).padStart(2,'0')+':00 UTC';
+    var cfgArr=[
+        {cls:'q025',label:'q=0.025',  val:data.p025[bestH],note:'lower bound'},
+        {cls:'q45', label:'q=0.45 ✶',val:data.p50[bestH], note:'point forecast'},
+        {cls:'q975',label:'q=0.975',  val:data.p975[bestH],note:'upper bound'}
+    ];
+    var cfg=cfgArr[tier];
+
+    var tip=document.getElementById('tip');
+    tip.innerHTML=
+        '<span class="t-zone">'+zoneName+'</span>'+
+        '<span class="t-hour">'+hStr+'</span>'+
+        '<div class="t-row">'+
+            '<span class="t-q">'+cfg.label+'</span>'+
+            '<span class="t-price '+cfg.cls+'">€'+cfg.val.toFixed(1)+'</span>'+
+            '<span class="t-unit">/ MWh</span>'+
+        '</div>'+
+        '<span class="t-note">'+cfg.note+'</span>';
+    tip.style.left=(winMouseX+18)+'px';
+    tip.style.top=(winMouseY-14)+'px';
+    tip.style.display='block';
+}
+function mouseExited(){hideTip();}
+function hideTip(){document.getElementById('tip').style.display='none';}
+</script>
+</body>
+</html>
