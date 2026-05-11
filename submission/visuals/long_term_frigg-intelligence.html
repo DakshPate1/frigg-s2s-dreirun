@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Frigg Intelligence</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: #0d0d0d;
+            min-height: 100vh;
+            color: #ffffff;
+            display: flex;
+        }
+
+        /* ── Sidebar ─────────────────────────────────────────────── */
+        .sidebar {
+            width: 280px;
+            flex-shrink: 0;
+            background: #111111;
+            border-right: 1px solid #222222;
+            display: flex;
+            flex-direction: column;
+            padding: 28px 22px;
+            overflow-y: auto;
+            gap: 0;
+        }
+
+        .brand-block {
+            margin-bottom: 32px;
+        }
+        .brand-logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+        }
+        .brand-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #4ade80;
+            flex-shrink: 0;
+        }
+        .brand-name {
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #ffffff;
+        }
+        .brand-sub {
+            font-size: 11px;
+            font-weight: 400;
+            color: #555;
+            letter-spacing: 0.02em;
+            margin-left: 16px;
+        }
+        .brand-rule {
+            height: 1px;
+            background: #1e1e1e;
+            margin-top: 20px;
+        }
+
+        .section {
+            margin-bottom: 28px;
+        }
+        .section-label {
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: #444;
+            margin-bottom: 14px;
+        }
+
+        /* Seed controls */
+        .seed-display {
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-size: 16px;
+            font-weight: 500;
+            color: #fff;
+            text-align: center;
+            letter-spacing: 0.04em;
+            margin-bottom: 10px;
+        }
+        .seed-btns {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+        .seed-btns button {
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 5px;
+            color: #aaa;
+            font-family: inherit;
+            font-size: 12px;
+            padding: 7px;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s, border-color 0.15s;
+        }
+        .seed-btns button:hover {
+            background: #222;
+            border-color: #3a3a3a;
+            color: #fff;
+        }
+        .seed-random-btn {
+            width: 100%;
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 5px;
+            color: #aaa;
+            font-family: inherit;
+            font-size: 12px;
+            padding: 8px;
+            cursor: pointer;
+            margin-bottom: 8px;
+            transition: background 0.15s, color 0.15s;
+        }
+        .seed-random-btn:hover { background: #222; color: #fff; }
+        .seed-jump {
+            display: flex;
+            gap: 6px;
+        }
+        .seed-jump input {
+            flex: 1;
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 5px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 12px;
+            padding: 7px 10px;
+            outline: none;
+        }
+        .seed-jump input:focus { border-color: #4ade80; }
+        .seed-jump button {
+            background: #4ade80;
+            border: none;
+            border-radius: 5px;
+            color: #000;
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 7px 12px;
+            cursor: pointer;
+        }
+        .seed-jump button:hover { background: #6bef99; }
+
+        /* Parameter controls */
+        .control-row {
+            margin-bottom: 14px;
+        }
+        .control-row label {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 6px;
+        }
+        .control-row label span {
+            color: #ddd;
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+        input[type=range] {
+            width: 100%;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 2px;
+            background: #2a2a2a;
+            border-radius: 1px;
+            outline: none;
+            cursor: pointer;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 12px; height: 12px;
+            border-radius: 50%;
+            background: #4ade80;
+            cursor: pointer;
+            transition: transform 0.15s;
+        }
+        input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.3); }
+
+        /* Legend */
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 5px 0;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        .legend-item:last-child { border-bottom: none; }
+        .legend-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .legend-name { font-size: 12px; color: #888; flex: 1; }
+        .legend-cost { font-size: 11px; color: #555; font-variant-numeric: tabular-nums; }
+
+        /* Action buttons */
+        .action-btn {
+            width: 100%;
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 5px;
+            color: #aaa;
+            font-family: inherit;
+            font-size: 12px;
+            padding: 9px;
+            cursor: pointer;
+            margin-bottom: 6px;
+            transition: background 0.15s, color 0.15s;
+        }
+        .action-btn:hover { background: #222; color: #fff; }
+        .action-btn.primary {
+            background: #4ade80;
+            border-color: #4ade80;
+            color: #000;
+            font-weight: 600;
+        }
+        .action-btn.primary:hover { background: #6bef99; }
+
+        /* ── Canvas area ──────────────────────────────────────────── */
+        .canvas-area {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #0d0d0d;
+            padding: 20px;
+        }
+
+        canvas { display: block; border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<!-- ── Sidebar ──────────────────────────────────────────────────── -->
+<div class="sidebar">
+
+    <!-- Brand -->
+    <div class="brand-block">
+        <div class="brand-logo">
+            <div class="brand-dot"></div>
+            <div class="brand-name">Fr.gg</div>
+        </div>
+        <div class="brand-sub">Intelligence · Merit Order</div>
+        <div class="brand-rule"></div>
+    </div>
+
+    <!-- Seed -->
+    <div class="section">
+        <div class="section-label">Seed</div>
+        <div class="seed-display" id="seedDisplay">42</div>
+        <div class="seed-btns">
+            <button onclick="prevSeed()">← Prev</button>
+            <button onclick="nextSeed()">Next →</button>
+        </div>
+        <button class="seed-random-btn" onclick="randomSeedFn()">⇆ Random</button>
+        <div class="seed-jump">
+            <input type="number" id="seedInput" placeholder="Jump to…" min="1" max="9999">
+            <button onclick="jumpSeed()">Go</button>
+        </div>
+    </div>
+
+    <!-- Parameters -->
+    <div class="section">
+        <div class="section-label">Parameters</div>
+
+        <div class="control-row">
+            <label>Scan Speed <span id="v-speed">0.70</span></label>
+            <input type="range" id="s-speed" min="0.1" max="2.0" step="0.05" value="0.70"
+                   oninput="params.scanSpeed=+this.value;document.getElementById('v-speed').textContent=(+this.value).toFixed(2)">
+        </div>
+        <div class="control-row">
+            <label>Ring Precision <span id="v-prec">1.00</span></label>
+            <input type="range" id="s-prec" min="0.3" max="2.0" step="0.05" value="1.00"
+                   oninput="params.ringPrec=+this.value;document.getElementById('v-prec').textContent=(+this.value).toFixed(2);invalidateBuffer()">
+        </div>
+        <div class="control-row">
+            <label>Glow Intensity <span id="v-glow">0.55</span></label>
+            <input type="range" id="s-glow" min="0.0" max="1.0" step="0.05" value="0.55"
+                   oninput="params.glowIntensity=+this.value;document.getElementById('v-glow').textContent=(+this.value).toFixed(2)">
+        </div>
+        <div class="control-row">
+            <label>Particle Density <span id="v-part">22</span></label>
+            <input type="range" id="s-part" min="5" max="60" step="1" value="22"
+                   oninput="params.particleDensity=+this.value;document.getElementById('v-part').textContent=this.value;rebuildParticles()">
+        </div>
+        <div class="control-row">
+            <label>Ring Spacing <span id="v-spc">1.00</span></label>
+            <input type="range" id="s-spc" min="0.6" max="1.4" step="0.05" value="1.00"
+                   oninput="params.ringSpacing=+this.value;document.getElementById('v-spc').textContent=(+this.value).toFixed(2);invalidateBuffer()">
+        </div>
+    </div>
+
+    <!-- Legend -->
+    <div class="section">
+        <div class="section-label">Merit Order</div>
+        <div id="legend-container"></div>
+    </div>
+
+    <!-- Actions -->
+    <div class="section" style="margin-top:auto;">
+        <div class="section-label">Actions</div>
+        <button class="action-btn primary" onclick="triggerRegen()">↺ Regenerate</button>
+        <button class="action-btn" onclick="resetAll()">Reset Defaults</button>
+        <button class="action-btn" onclick="downloadPNG()">⬇ Download PNG</button>
+    </div>
+</div>
+
+<!-- ── Canvas ──────────────────────────────────────────────────── -->
+<div class="canvas-area" id="canvas-container"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+//  FRIGG INTELLIGENCE · DE-LU Merit Order · 2018–2045
+//  Monochrome precision aesthetic — rings, data, scanner
+// ═══════════════════════════════════════════════════════════════════
+
+// ── Real data ────────────────────────────────────────────────────
+const DATA = {
+  years: [2018,2019,2020,2021,2022,2023,2024,2025,2026,2027,2028,
+          2029,2030,2031,2032,2033,2034,2035,2036,2037,2038,2039,
+          2040,2041,2042,2043,2044,2045],
+
+  windSolar:   [99.64,112.0,127.4,148.6,175.0,202.0,234.0,270.0,
+                304.0,338.0,370.0,398.0,424.0,440.0,450.0,454.0,
+                456.0,458.0,460.0,462.0,464.0,466.0,468.0,470.0,
+                472.0,474.0,478.0,480.0],
+
+  hydro:       [9.6,9.6,9.7,9.7,9.8,9.9,9.9,10.0,10.0,10.1,
+                10.1,10.2,10.2,10.2,10.3,10.3,10.4,10.4,10.5,
+                10.5,10.6,10.6,10.7,10.7,10.8,10.8,10.9,11.0],
+
+  biomass:     [10.7,11.0,11.2,11.5,11.6,11.8,11.9,12.1,12.2,12.4,
+                12.5,12.6,12.7,12.8,12.8,12.9,12.9,13.0,13.0,13.0,
+                13.1,13.1,13.1,13.2,13.2,13.2,13.3,13.3],
+
+  nuclear:     [9.5,8.1,8.1,8.1,8.1,4.1,0.0,0.0,0.0,0.0,0.0,
+                0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                0.0,0.0,0.0,0.0,0.0,0.0],
+
+  lignite:     [21.0,19.0,17.5,18.0,18.0,16.0,14.0,12.0,10.0,
+                8.5,7.0,5.5,4.5,3.5,2.5,1.5,0.5,0.0,0.0,0.0,
+                0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
+
+  coal:        [24.0,22.5,20.0,20.5,19.0,16.0,13.5,11.0,9.0,7.0,
+                5.5,4.0,3.0,2.0,1.0,0.5,0.0,0.0,0.0,0.0,0.0,
+                0.0,0.0,0.0,0.0,0.0,0.0,0.0],
+
+  gas:         [30.0,30.5,31.0,32.0,33.0,33.5,34.0,35.0,35.5,
+                36.0,36.5,37.0,37.5,38.0,38.5,39.0,39.5,40.0,
+                40.5,41.0,41.5,42.0,42.5,43.0,43.5,44.0,44.5,45.0],
+
+  oilPeak:     [4.0,4.0,4.1,4.1,4.2,4.2,4.3,4.3,4.4,4.4,4.5,
+                4.5,4.5,4.6,4.6,4.7,4.7,4.8,4.8,4.9,4.9,5.0,
+                5.0,5.1,5.1,5.2,5.2,5.3],
+};
+
+// Technologies in merit order (inner cheapest → outer most expensive)
+const TECHS = [
+  // inner ring = cheapest
+  { key:'windSolar',  label:'Wind & Solar',   rgb:[220,220,220], cost:'≈€0' },
+  { key:'hydro',      label:'Hydro',           rgb:[140,185,210], cost:'≈€0' },
+  { key:'biomass',    label:'Biomass & Other', rgb:[120,175,130], cost:'≈€0' },
+  { key:'nuclear',    label:'Nuclear',         rgb:[185,175,210], cost:'~€5'  },
+  { key:'lignite',    label:'Lignite',         rgb:[195,165,110], cost:'€9–63' },
+  { key:'coal',       label:'Coal',            rgb:[140,140,155], cost:'€12–156' },
+  { key:'gas',        label:'Gas CCGT',        rgb:[210,140,100], cost:'€10–497' },
+  { key:'oilPeak',    label:'Oil Peaker',      rgb:[200,100,100], cost:'€42–213' },
+  // outer ring = most expensive
+];
+
+const N_YEARS = DATA.years.length;   // 28
+
+// ── Parameters ──────────────────────────────────────────────────
+let params = {
+  seed:           42,
+  scanSpeed:      0.70,
+  ringPrec:       1.00,
+  glowIntensity:  0.55,
+  particleDensity:22,
+  ringSpacing:    1.00,
+};
+
+// ── State ───────────────────────────────────────────────────────
+let ringBuffer = null;
+let bufferDirty = true;
+let cursorAngle = -Math.PI / 2;   // start at top (2018)
+let particles   = [];
+let trailBuffer = null;
+
+const CW = 900, CH = 900;
+const CX = CW / 2, CY = CH / 2;
+
+// Ring radii — inner (cheapest) to outer
+const BASE_R  = [68, 118, 158, 196, 230, 260, 290, 320];
+const BASE_W  = 22;   // base ring width
+const MAX_W   = 32;   // extra width at peak capacity
+
+function interpolate(arr, t) {
+  const i0 = Math.floor(t * (N_YEARS - 1));
+  const i1 = Math.min(i0 + 1, N_YEARS - 1);
+  const f  = t * (N_YEARS - 1) - i0;
+  return arr[i0] * (1 - f) + arr[i1] * f;
+}
+
+function capAt(key, t) { return interpolate(DATA[key], t); }
+
+// ── Build static ring graphics ──────────────────────────────────
+function buildRingBuffer() {
+  if (!ringBuffer) ringBuffer = createGraphics(CW, CH);
+  const g = ringBuffer;
+  g.clear();
+  g.colorMode(RGB, 255);
+
+  // Compute max cap for each tech (for width normalization)
+  const maxCap = TECHS.map(tc => Math.max(...DATA[tc.key]));
+  const minCap = TECHS.map(tc => Math.min(...DATA[tc.key].filter(v => v > 0)));
+
+  const N_SEG = 420;
+
+  for (let k = 0; k < TECHS.length; k++) {
+    const tc   = TECHS[k];
+    const [r, gr, b] = tc.rgb;
+    const baseR = BASE_R[k] * params.ringSpacing;
+
+    for (let s = 0; s < N_SEG; s++) {
+      const t0 = s / N_SEG;
+      const t1 = (s + 1) / N_SEG;
+      const a0 = t0 * TWO_PI - HALF_PI;
+      const a1 = t1 * TWO_PI - HALF_PI;
+      const tMid = (t0 + t1) * 0.5;
+
+      const cap = capAt(tc.key, tMid);
+      if (cap <= 0) continue;
+
+      // Width encodes installed capacity
+      const capFrac = (cap - (minCap[k] || 0)) / (maxCap[k] - (minCap[k] || 0) || 1);
+      const w = (BASE_W + capFrac * MAX_W) * params.ringPrec;
+
+      // Alpha encodes capacity share fraction
+      const total = TECHS.reduce((s, t) => s + capAt(t.key, tMid), 0);
+      const share = cap / total;
+      // Minimum visibility + data-encoded brightness
+      const alpha = Math.max(55, Math.min(230, 60 + share * 900));
+
+      g.noFill();
+      g.stroke(r, gr, b, alpha);
+      g.strokeWeight(w);
+      g.arc(CX, CY, baseR * 2, baseR * 2, a0, a1);
+    }
+
+    // Tick marks at year positions
+    g.strokeWeight(1);
+    for (let yi = 0; yi < N_YEARS; yi += 4) {
+      const t = yi / (N_YEARS - 1);
+      const a = t * TWO_PI - HALF_PI;
+      const r1 = baseR - BASE_W * 0.8;
+      const r2 = baseR + BASE_W * 0.8;
+      g.stroke(r, gr, b, 80);
+      g.line(
+        CX + cos(a) * r1, CY + sin(a) * r1,
+        CX + cos(a) * r2, CY + sin(a) * r2
+      );
+    }
+  }
+
+  bufferDirty = false;
+}
+
+// ── Particles ────────────────────────────────────────────────────
+class Particle {
+  constructor(techIdx) {
+    this.techIdx = techIdx;
+    this.reset();
+  }
+  reset() {
+    const baseR = BASE_R[this.techIdx] * params.ringSpacing;
+    const tc = TECHS[this.techIdx];
+    const maxCap = Math.max(...DATA[tc.key]);
+    const cap = random(DATA[tc.key].filter(v => v > 0));
+    const capFrac = cap / maxCap;
+    const w = (BASE_W + capFrac * MAX_W) * params.ringPrec;
+    const r = baseR + random(-w * 0.4, w * 0.4);
+
+    this.angle = random(TWO_PI) - HALF_PI;
+    this.r     = r;
+    this.speed = random(0.003, 0.007) * (1.2 - this.techIdx * 0.05);
+    this.size  = random(1.5, 3.5);
+    this.alpha = random(90, 200);
+    this.rgb   = TECHS[this.techIdx].rgb;
+    this.life  = random(180, 360);
+    this.age   = random(this.life);
+  }
+  update() {
+    this.angle += this.speed;
+    this.age++;
+    if (this.age > this.life) this.reset();
+  }
+  draw(g) {
+    const fade = Math.min(1, Math.min(this.age, this.life - this.age) / 30);
+    const a = this.alpha * fade;
+    const [r, gr, b] = this.rgb;
+    g.noStroke();
+    g.fill(r, gr, b, a);
+    g.circle(CX + cos(this.angle) * this.r, CY + sin(this.angle) * this.r, this.size);
+  }
+}
+
+function rebuildParticles() {
+  randomSeed(params.seed);
+  particles = [];
+  const dens = params.particleDensity;
+  for (let k = 0; k < TECHS.length; k++) {
+    for (let p = 0; p < dens; p++) {
+      particles.push(new Particle(k));
+    }
+  }
+}
+
+// ── Scanner cursor ───────────────────────────────────────────────
+function drawCursor(g) {
+  // Year fraction from angle
+  const normA = ((cursorAngle + HALF_PI + TWO_PI) % TWO_PI) / TWO_PI;
+  const yearFrac  = normA;
+  const yearFloat = 2018 + yearFrac * (2045 - 2018);
+  const yearInt   = Math.round(yearFloat);
+
+  const innerR = BASE_R[0] * params.ringSpacing - BASE_W * 1.2;
+  const outerR = BASE_R[7] * params.ringSpacing + BASE_W * 1.2;
+
+  const gi  = params.glowIntensity;
+
+  // Glow layers (additive)
+  g.blendMode(ADD);
+  const glowSteps = [[outerR * 0.9, 28, 0.10],[outerR * 0.95, 18, 0.18],[outerR, 10, 0.28],[outerR, 5, 0.4]];
+  for (const [rr, sw, al] of glowSteps) {
+    g.stroke(180, 255, 180, Math.round(al * gi * 255));
+    g.strokeWeight(sw);
+    g.noFill();
+    g.line(
+      CX + cos(cursorAngle) * innerR * 0.6,
+      CY + sin(cursorAngle) * innerR * 0.6,
+      CX + cos(cursorAngle) * rr,
+      CY + sin(cursorAngle) * rr
+    );
+  }
+  g.blendMode(BLEND);
+
+  // Crisp line
+  g.stroke(220, 255, 220, 220);
+  g.strokeWeight(1);
+  g.line(
+    CX + cos(cursorAngle) * innerR * 0.5,
+    CY + sin(cursorAngle) * innerR * 0.5,
+    CX + cos(cursorAngle) * outerR,
+    CY + sin(cursorAngle) * outerR
+  );
+
+  // Highlight ring intersections
+  g.blendMode(ADD);
+  for (let k = 0; k < TECHS.length; k++) {
+    const baseR = BASE_R[k] * params.ringSpacing;
+    const [r, gr, b] = TECHS[k].rgb;
+    const cap = capAt(TECHS[k].key, yearFrac);
+    if (cap <= 0) continue;
+    const total = TECHS.reduce((s, tc) => s + capAt(tc.key, yearFrac), 0);
+    const share = cap / total;
+    const bright = Math.min(1, 0.4 + share * 2.5) * gi;
+    g.noFill();
+    g.stroke(r, gr, b, Math.round(bright * 180));
+    g.strokeWeight(6);
+    g.arc(CX, CY, baseR * 2, baseR * 2, cursorAngle - 0.04, cursorAngle + 0.04);
+  }
+  g.blendMode(BLEND);
+
+  // Year label at cursor tip
+  const tipX = CX + cos(cursorAngle) * (outerR + 18);
+  const tipY = CY + sin(cursorAngle) * (outerR + 18);
+  g.noStroke();
+  g.fill(220, 255, 220, 200);
+  g.textFont('Inter, system-ui, sans-serif');
+  g.textSize(11);
+  g.textAlign(CENTER, CENTER);
+  g.text(String(yearInt), tipX, tipY);
+
+  // Capacity readout strip at bottom
+  drawReadout(g, yearFrac, yearInt);
+}
+
+function drawReadout(g, yearFrac, year) {
+  const total = TECHS.reduce((s, tc) => s + capAt(tc.key, yearFrac), 0);
+  const bx = CX - 200, by = CH - 48, bw = 400, bh = 16;
+
+  g.noStroke();
+  g.fill(20, 20, 20, 200);
+  g.rect(bx - 4, by - 22, bw + 8, bh + 34, 4);
+
+  // Stacked bar
+  let cx2 = bx;
+  for (let k = 0; k < TECHS.length; k++) {
+    const cap = capAt(TECHS[k].key, yearFrac);
+    const w   = (cap / total) * bw;
+    const [r, gr, b] = TECHS[k].rgb;
+    g.fill(r, gr, b, 180);
+    g.rect(cx2, by, w, bh, k === 0 ? 3 : 0, k === TECHS.length - 1 ? 3 : 0, k === TECHS.length - 1 ? 3 : 0, k === 0 ? 3 : 0);
+    cx2 += w;
+  }
+
+  // Labels
+  g.fill(150, 150, 150, 200);
+  g.textSize(10);
+  g.textAlign(LEFT, CENTER);
+  g.text(`${year}  ·  Total ${Math.round(total)} GW`, bx, by - 10);
+  g.textAlign(RIGHT, CENTER);
+  const renew = capAt(DATA['windSolar'] ? 'windSolar' : 'windSolar', yearFrac)
+              + capAt('hydro', yearFrac) + capAt('biomass', yearFrac);
+  const renewPct = Math.round(renew / total * 100);
+  g.fill(180, 255, 180, 180);
+  g.text(`${renewPct}% renewable`, bx + bw, by - 10);
+}
+
+// ── Center brand mark ────────────────────────────────────────────
+function drawCenter(g) {
+  const R = BASE_R[0] * params.ringSpacing - BASE_W * 1.5;
+
+  // Dark disc
+  g.noStroke();
+  g.fill(13, 13, 13, 240);
+  g.circle(CX, CY, R * 2);
+
+  // Subtle ring
+  g.noFill();
+  g.stroke(60, 60, 60, 180);
+  g.strokeWeight(1);
+  g.circle(CX, CY, R * 2);
+
+  // Green dot
+  g.noStroke();
+  g.fill(74, 222, 128, 220);
+  g.circle(CX - 28, CY - 8, 5);
+
+  // "Fr.gg"
+  g.fill(255, 255, 255, 220);
+  g.textFont('Inter, system-ui, sans-serif');
+  g.textSize(16);
+  g.textAlign(CENTER, CENTER);
+  g.textStyle(BOLD);
+  g.text('Fr.gg', CX, CY - 6);
+
+  // "Intelligence"
+  g.fill(100, 100, 100, 200);
+  g.textSize(9);
+  g.textStyle(NORMAL);
+  g.textAlign(CENTER, CENTER);
+  g.text('I N T E L L I G E N C E', CX, CY + 10);
+
+  // Pulsing halo
+  const pulse = 0.5 + 0.5 * sin(frameCount * 0.03);
+  g.noFill();
+  g.stroke(74, 222, 128, Math.round(pulse * 40));
+  g.strokeWeight(1.5);
+  g.circle(CX, CY, R * 2 + 6);
+}
+
+// ── Title overlay ─────────────────────────────────────────────────
+function drawTitle(g) {
+  g.noStroke();
+  g.fill(80, 80, 80, 200);
+  g.textFont('Inter, system-ui, sans-serif');
+  g.textSize(10);
+  g.textAlign(LEFT, TOP);
+  g.text('Frigg Intelligence  ·  DE-LU Merit Order  ·  2018–2045', 18, 16);
+  g.fill(50, 50, 50, 180);
+  g.textSize(9);
+  g.text('Concentric rings: outer→inner by marginal cost · arc width = installed capacity (GW)', 18, 30);
+
+  // Year labels at cardinal positions
+  const labelYears = [[2018,-HALF_PI],[2027,0],[2036,HALF_PI],[2045,PI]];
+  for (const [yr, a] of labelYears) {
+    const r = BASE_R[7] * params.ringSpacing + 38;
+    g.fill(80, 80, 80, 160);
+    g.textSize(9);
+    g.textAlign(CENTER, CENTER);
+    g.text(String(yr), CX + cos(a) * r, CY + sin(a) * r);
+  }
+}
+
+// ── p5.js lifecycle ──────────────────────────────────────────────
+function setup() {
+  const cnv = createCanvas(CW, CH);
+  cnv.parent('canvas-container');
+  colorMode(RGB, 255);
+  trailBuffer = createGraphics(CW, CH);
+  trailBuffer.colorMode(RGB, 255);
+  buildLegend();
+  rebuildParticles();
+  buildRingBuffer();
+}
+
+function draw() {
+  if (bufferDirty) buildRingBuffer();
+
+  // Trails fade
+  trailBuffer.background(13, 13, 13, 30);
+
+  // Draw ring buffer (static, pre-rendered)
+  background(13, 13, 13);
+  image(ringBuffer, 0, 0);
+
+  // Update & draw particles to trail buffer
+  trailBuffer.noStroke();
+  for (const p of particles) {
+    p.update();
+    p.draw(trailBuffer);
+  }
+  image(trailBuffer, 0, 0);
+
+  // Cursor
+  cursorAngle += 0.004 * params.scanSpeed;
+  if (cursorAngle > TWO_PI - HALF_PI) cursorAngle = -HALF_PI;
+
+  drawCursor(window);   // draw directly to main canvas
+  drawCenter(window);
+  drawTitle(window);
+}
+
+// ── Legend ───────────────────────────────────────────────────────
+function buildLegend() {
+  const c = document.getElementById('legend-container');
+  c.innerHTML = '';
+  // Show in merit order (cheapest first = top of list)
+  [...TECHS].forEach(tc => {
+    const div = document.createElement('div');
+    div.className = 'legend-item';
+    const [r, g, b] = tc.rgb;
+    div.innerHTML = `
+      <div class="legend-dot" style="background:rgb(${r},${g},${b})"></div>
+      <div class="legend-name">${tc.label}</div>
+      <div class="legend-cost">${tc.cost}</div>
+    `;
+    c.appendChild(div);
+  });
+}
+
+// ── Seed helpers ─────────────────────────────────────────────────
+function applySeed() {
+  document.getElementById('seedDisplay').textContent = params.seed;
+  randomSeed(params.seed);
+  noiseSeed(params.seed);
+  rebuildParticles();
+}
+function prevSeed() { params.seed = Math.max(1, params.seed - 1); applySeed(); }
+function nextSeed() { params.seed = Math.min(9999, params.seed + 1); applySeed(); }
+function randomSeedFn() { params.seed = Math.floor(Math.random() * 9000) + 1; applySeed(); }
+function jumpSeed() {
+  const v = parseInt(document.getElementById('seedInput').value);
+  if (!isNaN(v) && v >= 1) { params.seed = v; applySeed(); }
+}
+
+// ── Other controls ───────────────────────────────────────────────
+function invalidateBuffer() { bufferDirty = true; }
+function triggerRegen() { bufferDirty = true; rebuildParticles(); }
+function resetAll() {
+  params = { seed:42, scanSpeed:0.70, ringPrec:1.00, glowIntensity:0.55, particleDensity:22, ringSpacing:1.00 };
+  document.getElementById('s-speed').value = 0.70;
+  document.getElementById('v-speed').textContent = '0.70';
+  document.getElementById('s-prec').value  = 1.00;
+  document.getElementById('v-prec').textContent  = '1.00';
+  document.getElementById('s-glow').value  = 0.55;
+  document.getElementById('v-glow').textContent  = '0.55';
+  document.getElementById('s-part').value  = 22;
+  document.getElementById('v-part').textContent  = '22';
+  document.getElementById('s-spc').value   = 1.00;
+  document.getElementById('v-spc').textContent   = '1.00';
+  applySeed();
+  bufferDirty = true;
+}
+function downloadPNG() {
+  saveCanvas('frigg-intelligence', 'png');
+}
+</script>
+</body>
+</html>
